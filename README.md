@@ -217,6 +217,8 @@ This is the core algorithm that makes Pool powerful. Understanding this helps yo
 
 The priority tree is a **hierarchical decision tree** where each level represents a prioritization dimension. Think of it like a multi-level sorting system:
 
+**Depth limit:** The tree supports up to 10 levels (levels 1-10). Deeper configurations are rejected.
+
 ```
 Level 1: Region          Level 2: Customer Tier    Level 3: Transaction Size
 ┌─────────────────┐      ┌──────────────────┐      ┌─────────────────┐

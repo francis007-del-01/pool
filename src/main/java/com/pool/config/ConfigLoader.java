@@ -102,13 +102,14 @@ public class ConfigLoader {
         if (map == null) {
             return ExecutorConfig.defaults();
         }
+        ExecutorConfig defaults = ExecutorConfig.defaults();
         return new ExecutorConfig(
-                getInt(map, "core-pool-size", 50),
-                getInt(map, "max-pool-size", 200),
-                getInt(map, "queue-capacity", 10000),
-                getInt(map, "keep-alive-seconds", 60),
-                getString(map, "thread-name-prefix", "pool-"),
-                getBoolean(map, "allow-core-thread-timeout", true)
+                getInt(map, "core-pool-size", defaults.corePoolSize()),
+                getInt(map, "max-pool-size", defaults.maxPoolSize()),
+                getInt(map, "queue-capacity", defaults.queueCapacity()),
+                getInt(map, "keep-alive-seconds", defaults.keepAliveSeconds()),
+                getString(map, "thread-name-prefix", defaults.threadNamePrefix()),
+                getBoolean(map, "allow-core-thread-timeout", defaults.allowCoreThreadTimeout())
         );
     }
 

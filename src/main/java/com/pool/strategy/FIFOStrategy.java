@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Optional;
 import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -29,6 +30,7 @@ public class FIFOStrategy implements PriorityStrategy {
 
     private final int capacity;
     private final PriorityBlockingQueue<PrioritizedTask<?>> queue;
+    private final Semaphore capacitySemaphore;
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
 
     public FIFOStrategy(int capacity) {
@@ -37,6 +39,7 @@ public class FIFOStrategy implements PriorityStrategy {
                 Math.min(capacity, 1000), // Initial capacity
                 (t1, t2) -> t1.compareTo(t2)
         );
+        this.capacitySemaphore = new Semaphore(capacity);
         log.info("FIFOStrategy initialized with capacity: {}", capacity);
     }
 
@@ -52,13 +55,16 @@ public class FIFOStrategy implements PriorityStrategy {
             return false;
         }
 
-        // Check capacity (PriorityBlockingQueue is unbounded, so we enforce manually)
-        if (queue.size() >= capacity) {
+        // Enforce capacity atomically (PriorityBlockingQueue is unbounded)
+        if (!capacitySemaphore.tryAcquire()) {
             log.warn("Queue at capacity ({}), rejecting task: {}", capacity, task.getTaskId());
             return false;
         }
 
         boolean added = queue.offer(task);
+        if (!added) {
+            capacitySemaphore.release();
+        }
         if (added) {
             log.trace("Task {} enqueued, queue size: {}", task.getTaskId(), queue.size());
         }
@@ -68,6 +74,7 @@ public class FIFOStrategy implements PriorityStrategy {
     @Override
     public PrioritizedTask<?> takeNext() throws InterruptedException {
         PrioritizedTask<?> task = queue.take();
+        capacitySemaphore.release();
         log.trace("Task {} dequeued (blocking), queue size: {}", task.getTaskId(), queue.size());
         return task;
     }
@@ -76,6 +83,7 @@ public class FIFOStrategy implements PriorityStrategy {
     public Optional<PrioritizedTask<?>> pollNext() {
         PrioritizedTask<?> task = queue.poll();
         if (task != null) {
+            capacitySemaphore.release();
             log.trace("Task {} dequeued (poll), queue size: {}", task.getTaskId(), queue.size());
         }
         return Optional.ofNullable(task);
@@ -85,6 +93,7 @@ public class FIFOStrategy implements PriorityStrategy {
     public Optional<PrioritizedTask<?>> pollNext(long timeout, TimeUnit unit) throws InterruptedException {
         PrioritizedTask<?> task = queue.poll(timeout, unit);
         if (task != null) {
+            capacitySemaphore.release();
             log.trace("Task {} dequeued (timed poll), queue size: {}", task.getTaskId(), queue.size());
         }
         return Optional.ofNullable(task);
@@ -107,7 +116,7 @@ public class FIFOStrategy implements PriorityStrategy {
 
     @Override
     public int getRemainingCapacity() {
-        return Math.max(0, capacity - queue.size());
+        return capacitySemaphore.availablePermits();
     }
 
     @Override

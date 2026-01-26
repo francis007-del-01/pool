@@ -68,7 +68,7 @@ public class TreeTraverser {
      * @param level   Current level (0-based)
      * @return SortByConfig if a leaf is matched, null otherwise
      */
-    private static final int MAX_DEPTH = 10;
+    private static final int MAX_DEPTH = 9;
 
     private SortByConfig traverseRecursive(List<PriorityNodeConfig> nodes, TaskContext context,
                                             List<MatchedNode> path, int level) {
@@ -77,7 +77,7 @@ public class TreeTraverser {
         }
 
         if (level > MAX_DEPTH) {
-            log.warn("Max tree depth ({}) exceeded, possible circular reference in config", MAX_DEPTH);
+            log.warn("Max tree depth ({}) exceeded, possible circular reference in config", MAX_DEPTH + 1);
             return null;
         }
 
