@@ -1,11 +1,13 @@
-package com.pool.core;
+package com.pool.adapter.executor;
 
 import com.pool.config.ExecutorConfig;
 import com.pool.config.PoolConfig;
+import com.pool.core.TaskContext;
 import com.pool.exception.TaskRejectedException;
 import com.pool.policy.DefaultPolicyEngine;
-import com.pool.policy.EvaluationResult;
 import com.pool.policy.PolicyEngine;
+import com.pool.scheduler.DefaultPriorityScheduler;
+import com.pool.scheduler.PriorityScheduler;
 import com.pool.strategy.PriorityStrategy;
 import com.pool.strategy.PriorityStrategyFactory;
 import org.slf4j.Logger;
@@ -15,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -30,6 +33,7 @@ public class DefaultPoolExecutor implements PoolExecutor {
     private final PoolConfig config;
     private final PolicyEngine policyEngine;
     private final PriorityStrategy priorityStrategy;
+    private final PriorityScheduler<ExecutableTask> priorityScheduler;
     private final List<WorkerThread> workers;
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
     private final AtomicInteger submittedCount = new AtomicInteger(0);
@@ -52,6 +56,7 @@ public class DefaultPoolExecutor implements PoolExecutor {
                 config.priorityStrategy(),
                 execConfig.queueCapacity()
         );
+        this.priorityScheduler = new DefaultPriorityScheduler<>(policyEngine, priorityStrategy);
 
         // Create worker threads
         this.workers = new ArrayList<>();
@@ -68,7 +73,17 @@ public class DefaultPoolExecutor implements PoolExecutor {
     }
 
     private void startWorker(int workerId, boolean isCoreThread) {
-        WorkerThread worker = new WorkerThread(workerId, isCoreThread);
+        WorkerThread worker = new WorkerThread(
+                workerId,
+                isCoreThread,
+                execConfig,
+                priorityScheduler,
+                shutdown,
+                activeCount,
+                completedCount,
+                this::removeWorker,
+                log
+        );
         synchronized (workers) {
             workers.add(worker);
         }
@@ -97,22 +112,17 @@ public class DefaultPoolExecutor implements PoolExecutor {
             throw new TaskRejectedException("Executor is shutdown");
         }
 
-        // Evaluate priority
-        EvaluationResult result = policyEngine.evaluate(context);
+        FutureTask<Void> futureTask = new FutureTask<>(task, null);
+        ExecutableTask executableTask = new ExecutableTask(futureTask, context.getTaskId());
 
-        // Create prioritized task
-        PrioritizedTask<?> prioritizedTask = new PrioritizedTask<>(task, context, result);
-
-        // Enqueue to strategy
-        if (!priorityStrategy.enqueue(prioritizedTask)) {
+        if (!priorityScheduler.submit(context, executableTask)) {
             rejectedCount.incrementAndGet();
             throw new TaskRejectedException("Queue is full, task rejected: " + context.getTaskId());
         }
 
         submittedCount.incrementAndGet();
-        log.debug("Task {} submitted with priority {} (queue size: {})",
-                context.getTaskId(), result.getPriorityKey().getPathVector(),
-                priorityStrategy.getQueueSize());
+        log.debug("Task {} submitted (queue size: {})",
+                context.getTaskId(), priorityScheduler.size());
 
         // Scale up workers if needed
         maybeScaleUp();
@@ -130,27 +140,22 @@ public class DefaultPoolExecutor implements PoolExecutor {
             throw new TaskRejectedException("Executor is shutdown");
         }
 
-        // Evaluate priority
-        EvaluationResult result = policyEngine.evaluate(context);
+        FutureTask<T> futureTask = new FutureTask<>(task);
+        ExecutableTask executableTask = new ExecutableTask(futureTask, context.getTaskId());
 
-        // Create prioritized task
-        PrioritizedTask<T> prioritizedTask = new PrioritizedTask<>(task, context, result);
-
-        // Enqueue to strategy
-        if (!priorityStrategy.enqueue(prioritizedTask)) {
+        if (!priorityScheduler.submit(context, executableTask)) {
             rejectedCount.incrementAndGet();
             throw new TaskRejectedException("Queue is full, task rejected: " + context.getTaskId());
         }
 
         submittedCount.incrementAndGet();
-        log.debug("Task {} submitted with priority {} (queue size: {})",
-                context.getTaskId(), result.getPriorityKey().getPathVector(),
-                priorityStrategy.getQueueSize());
+        log.debug("Task {} submitted (queue size: {})",
+                context.getTaskId(), priorityScheduler.size());
 
         // Scale up workers if needed
         maybeScaleUp();
 
-        return prioritizedTask;
+        return futureTask;
     }
 
     /**
@@ -158,7 +163,7 @@ public class DefaultPoolExecutor implements PoolExecutor {
      */
     private void maybeScaleUp() {
         int currentWorkers = workerCount.get();
-        int queueSize = priorityStrategy.getQueueSize();
+        int queueSize = priorityScheduler.size();
 
         // If queue has items and we have room for more workers
         if (queueSize > 0 && currentWorkers < execConfig.maxPoolSize()) {
@@ -174,7 +179,7 @@ public class DefaultPoolExecutor implements PoolExecutor {
     public void shutdown() {
         log.info("Shutting down PoolExecutor: {}", config.name());
         shutdown.set(true);
-        priorityStrategy.shutdown();
+        priorityScheduler.shutdown();
 
         // Interrupt workers waiting on queue
         for (WorkerThread worker : workers) {
@@ -186,7 +191,7 @@ public class DefaultPoolExecutor implements PoolExecutor {
     public void shutdownNow() {
         log.info("Shutting down PoolExecutor immediately: {}", config.name());
         shutdown.set(true);
-        priorityStrategy.shutdown();
+        priorityScheduler.shutdown();
 
         // Interrupt all workers
         for (WorkerThread worker : workers) {
@@ -230,7 +235,7 @@ public class DefaultPoolExecutor implements PoolExecutor {
 
     @Override
     public int getQueueSize() {
-        return priorityStrategy.getQueueSize();
+        return priorityScheduler.size();
     }
 
     @Override
@@ -293,80 +298,4 @@ public class DefaultPoolExecutor implements PoolExecutor {
      * Worker thread that pulls tasks from the priority strategy.
      * Core threads block indefinitely unless allow-core-thread-timeout is enabled.
      */
-    private class WorkerThread extends Thread {
-
-        private final int workerId;
-        private final boolean isCoreThread;
-
-        WorkerThread(int workerId, boolean isCoreThread) {
-            super(execConfig.threadNamePrefix() + workerId);
-            this.workerId = workerId;
-            this.isCoreThread = isCoreThread;
-            setDaemon(false);
-        }
-
-        @Override
-        public void run() {
-            log.debug("Worker {} started (core={})", workerId, isCoreThread);
-
-            while (!shutdown.get()) {
-                try {
-                    PrioritizedTask<?> task;
-
-                    boolean allowCoreTimeout = execConfig.allowCoreThreadTimeout();
-                    if (isCoreThread && !allowCoreTimeout) {
-                        // Core threads block indefinitely
-                        task = priorityStrategy.takeNext();
-                    } else {
-                        // Timed poll - exit if idle too long
-                        var optionalTask = priorityStrategy.pollNext(
-                                execConfig.keepAliveSeconds(), TimeUnit.SECONDS);
-
-                        if (optionalTask.isEmpty()) {
-                            // Timeout - no work available, scale down
-                            log.debug("Worker {} idle for {}s, scaling down",
-                                    workerId, execConfig.keepAliveSeconds());
-                            break;
-                        }
-                        task = optionalTask.get();
-                    }
-
-                    activeCount.incrementAndGet();
-                    try {
-                        long startTime = System.currentTimeMillis();
-                        log.debug("Worker {} executing task {} (waited {}ms)",
-                                workerId, task.getTaskId(), task.getWaitTimeMs());
-
-                        // Execute the task
-                        task.run();
-
-                        long duration = System.currentTimeMillis() - startTime;
-                        completedCount.incrementAndGet();
-                        log.debug("Worker {} completed task {} in {}ms",
-                                workerId, task.getTaskId(), duration);
-
-                    } catch (Exception e) {
-                        log.error("Worker {} task {} failed: {}",
-                                workerId, task.getTaskId(), e.getMessage(), e);
-                    } finally {
-                        activeCount.decrementAndGet();
-                    }
-
-                } catch (InterruptedException e) {
-                    if (shutdown.get()) {
-                        log.debug("Worker {} interrupted for shutdown", workerId);
-                        break;
-                    }
-                    Thread.currentThread().interrupt();
-                }
-            }
-
-            // Remove self from workers list if not shutting down
-            if (!shutdown.get()) {
-                removeWorker(this);
-            }
-
-            log.debug("Worker {} stopped", workerId);
-        }
-    }
 }

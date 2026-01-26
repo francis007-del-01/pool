@@ -1,10 +1,10 @@
 package com.pool;
 
-import com.pool.core.DefaultPoolExecutor;
-import com.pool.core.PoolExecutor;
+import com.pool.adapter.executor.DefaultPoolExecutor;
+import com.pool.adapter.executor.PoolExecutor;
 import com.pool.core.TaskContext;
 import com.pool.core.TaskContextFactory;
-import com.pool.spring.EnablePool;
+import com.pool.adapter.spring.EnablePool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;

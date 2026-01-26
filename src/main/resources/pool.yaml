@@ -2,14 +2,19 @@ pool:
   name: "example-pool"
   version: "1.0"
 
-  # Thread pool executor configuration
-  executor:
-    core-pool-size: 10
-    max-pool-size: 50
+  # Priority scheduler configuration
+  scheduler:
     queue-capacity: 1000
-    keep-alive-seconds: 5      # Short timeout for demo (5 seconds)
-    thread-name-prefix: "pool-worker-"
-    allow-core-thread-timeout: true
+
+  # Adapter configurations
+  adapters:
+    executor:
+      core-pool-size: 10
+      max-pool-size: 50
+      queue-capacity: 1000
+      keep-alive-seconds: 5      # Short timeout for demo (5 seconds)
+      thread-name-prefix: "pool-worker-"
+      allow-core-thread-timeout: true
 
   # Priority Strategy Configuration
   # Controls how tasks are selected at execution time

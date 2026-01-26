@@ -1,4 +1,6 @@
-package com.pool.core;
+package com.pool.adapter.executor;
+
+import com.pool.core.TaskContext;
 
 import java.util.concurrent.Callable;
 import java.util.concurrent.Future;

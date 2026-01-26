@@ -7,7 +7,8 @@ import java.util.List;
  *
  * @param name              Pool name identifier
  * @param version           Configuration version
- * @param executor          Thread pool executor configuration
+ * @param executor          Thread pool executor configuration (adapter)
+ * @param scheduler         Priority scheduler configuration
  * @param priorityTree      Priority tree configuration (list of root nodes)
  * @param priorityStrategy  Priority strategy configuration (FIFO, TIME_BASED, etc.)
  */
@@ -15,6 +16,7 @@ public record PoolConfig(
         String name,
         String version,
         ExecutorConfig executor,
+        SchedulerConfig scheduler,
         List<PriorityNodeConfig> priorityTree,
         StrategyConfig priorityStrategy
 ) {
@@ -26,6 +28,7 @@ public record PoolConfig(
                 "test-pool",
                 "1.0",
                 ExecutorConfig.minimal(),
+                SchedulerConfig.minimal(),
                 List.of(new PriorityNodeConfig(
                         "DEFAULT",
                         ConditionConfig.alwaysTrue(),

@@ -1,9 +1,9 @@
-package com.pool.spring;
+package com.pool.adapter.spring;
 
 import com.pool.config.ConfigLoader;
 import com.pool.config.PoolConfig;
-import com.pool.core.DefaultPoolExecutor;
-import com.pool.core.PoolExecutor;
+import com.pool.adapter.executor.DefaultPoolExecutor;
+import com.pool.adapter.executor.PoolExecutor;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

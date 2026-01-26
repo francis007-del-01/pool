@@ -1,6 +1,6 @@
 package com.pool.strategy;
 
-import com.pool.core.PrioritizedTask;
+import com.pool.core.PrioritizedPayload;
 
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -29,7 +29,7 @@ public interface PriorityStrategy {
      * @param task The prioritized task to enqueue
      * @return true if successfully enqueued, false if rejected (e.g., queue full)
      */
-    boolean enqueue(PrioritizedTask<?> task);
+    boolean enqueue(PrioritizedPayload<?> task);
 
     /**
      * Select and remove the next task to execute (blocking).
@@ -38,14 +38,14 @@ public interface PriorityStrategy {
      * @return The next task to execute
      * @throws InterruptedException if interrupted while waiting
      */
-    PrioritizedTask<?> takeNext() throws InterruptedException;
+    PrioritizedPayload<?> takeNext() throws InterruptedException;
 
     /**
      * Select and remove the next task to execute (non-blocking).
      *
      * @return The next task, or empty if queue is empty
      */
-    Optional<PrioritizedTask<?>> pollNext();
+    Optional<PrioritizedPayload<?>> pollNext();
 
     /**
      * Select and remove the next task to execute with timeout.
@@ -56,7 +56,7 @@ public interface PriorityStrategy {
      * @return The next task, or empty if timeout elapsed
      * @throws InterruptedException if interrupted while waiting
      */
-    Optional<PrioritizedTask<?>> pollNext(long timeout, TimeUnit unit) throws InterruptedException;
+    Optional<PrioritizedPayload<?>> pollNext(long timeout, TimeUnit unit) throws InterruptedException;
 
     /**
      * Get the current queue depth.

@@ -68,8 +68,14 @@ public class ConfigLoader {
         String name = getString(poolConfig, "name", "default-pool");
         String version = getString(poolConfig, "version", "1.0");
         
-        ExecutorConfig executor = parseExecutorConfig(
-                (Map<String, Object>) poolConfig.get("executor"));
+        Map<String, Object> adaptersConfig = (Map<String, Object>) poolConfig.get("adapters");
+        Map<String, Object> executorConfig = adaptersConfig != null
+                ? (Map<String, Object>) adaptersConfig.get("executor")
+                : (Map<String, Object>) poolConfig.get("executor"); // fallback
+        ExecutorConfig executor = parseExecutorConfig(executorConfig);
+
+        SchedulerConfig scheduler = parseSchedulerConfig(
+                (Map<String, Object>) poolConfig.get("scheduler"));
         
         List<PriorityNodeConfig> priorityTree = parsePriorityTree(
                 (List<Map<String, Object>>) poolConfig.get("priority-tree"));
@@ -89,7 +95,7 @@ public class ConfigLoader {
         }
 
         PoolConfig config = new PoolConfig(
-                name, version, executor, priorityTree, strategyConfig);
+                name, version, executor, scheduler, priorityTree, strategyConfig);
         
         log.info("Loaded Pool configuration: {} v{} with {} root nodes, strategy: {}",
                 name, version, priorityTree.size(), 
@@ -110,6 +116,16 @@ public class ConfigLoader {
                 getInt(map, "keep-alive-seconds", defaults.keepAliveSeconds()),
                 getString(map, "thread-name-prefix", defaults.threadNamePrefix()),
                 getBoolean(map, "allow-core-thread-timeout", defaults.allowCoreThreadTimeout())
+        );
+    }
+
+    private static SchedulerConfig parseSchedulerConfig(Map<String, Object> map) {
+        if (map == null) {
+            return SchedulerConfig.defaults();
+        }
+        SchedulerConfig defaults = SchedulerConfig.defaults();
+        return new SchedulerConfig(
+                getInt(map, "queue-capacity", defaults.queueCapacity())
         );
     }
 

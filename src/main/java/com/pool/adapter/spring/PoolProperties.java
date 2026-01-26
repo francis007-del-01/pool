@@ -1,4 +1,4 @@
-package com.pool.spring;
+package com.pool.adapter.spring;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 

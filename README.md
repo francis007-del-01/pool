@@ -1,10 +1,10 @@
 # Pool
 
-A policy-driven executor library with intelligent task prioritization for Java applications.
+A policy-driven prioritization library with an optional in-process executor adapter for Java applications.
 
 ## What is Pool?
 
-Pool is a **pluggable library** that replaces your standard thread pool executor with one that supports dynamic, policy-based task prioritization. Simply add the dependency, provide a YAML configuration, and submit tasks - Pool handles the intelligent ordering.
+Pool is a **pluggable prioritization engine** that evaluates tasks against a policy tree and orders them by priority. It can be used standalone (via `PriorityScheduler`) or through the optional in-process executor adapter.
 
 Instead of simple FIFO queues, Pool uses a **priority tree** to dynamically route and order tasks based on request attributes, business rules, and system state.
 
@@ -12,7 +12,7 @@ Instead of simple FIFO queues, Pool uses a **priority tree** to dynamically rout
 
 - **No Code Changes for Priority Logic** - Change prioritization rules via YAML, no redeployment needed
 - **Business-Driven Ordering** - Prioritize by customer tier, transaction amount, region, or any field
-- **Drop-in Replacement** - Works like a standard executor, just smarter
+- **Executor Adapter** - Optional in-process thread-pool adapter for drop-in use
 - **Framework Agnostic** - Works with Spring Boot, Micronaut, plain Java, or any JVM application
 
 ## Installation
@@ -44,10 +44,14 @@ pool:
   name: "order-processing-pool"
   version: "1.0"
 
-  executor:
-    core-pool-size: 10
-    max-pool-size: 50
+  scheduler:
     queue-capacity: 1000
+
+  adapters:
+    executor:
+      core-pool-size: 10
+      max-pool-size: 50
+      queue-capacity: 1000
 
   priority-strategy:
     type: FIFO
@@ -82,23 +86,51 @@ pool:
         direction: ASC
 ```
 
-### 2. Initialize the Pool Executor
+### 2. Initialize the Priority Scheduler (Recommended)
 
 ```java
 import com.pool.config.ConfigLoader;
 import com.pool.config.PoolConfig;
-import com.pool.core.PoolExecutor;
-import com.pool.core.DefaultPoolExecutor;
+import com.pool.scheduler.DefaultPriorityScheduler;
+import com.pool.scheduler.PriorityScheduler;
+
+// Load configuration
+PoolConfig config = ConfigLoader.load("classpath:pool.yaml");
+
+// Create priority scheduler
+PriorityScheduler<MyPayload> scheduler = new DefaultPriorityScheduler<>(config);
+```
+
+### 3. Submit Payloads (Prioritization First)
+
+```java
+import com.pool.core.TaskContext;
+import com.pool.core.TaskContextFactory;
+
+TaskContext ctx = TaskContextFactory.create(jsonPayload, contextMap);
+scheduler.submit(ctx, payload);
+
+// Pull highest priority payload
+MyPayload next = scheduler.getNext();
+```
+
+### 4. Initialize the In-Process Executor (Adapter)
+
+```java
+import com.pool.config.ConfigLoader;
+import com.pool.config.PoolConfig;
+import com.pool.adapter.executor.PoolExecutor;
+import com.pool.adapter.executor.DefaultPoolExecutor;
 
 // Load configuration
 PoolConfig config = ConfigLoader.load("classpath:pool.yaml");
 // Or from file path: ConfigLoader.load("/etc/myapp/pool.yaml");
 
-// Create executor
+// Create executor (adapter, uses PriorityScheduler internally)
 PoolExecutor executor = new DefaultPoolExecutor(config);
 ```
 
-### 3. Submit Tasks
+### 5. Submit Tasks (Adapter)
 
 ```java
 import com.pool.core.TaskContext;
@@ -129,7 +161,7 @@ executor.submit(taskContext, () -> {
 });
 ```
 
-### 4. Shutdown
+### 6. Shutdown
 
 ```java
 // Graceful shutdown - finish queued tasks
@@ -145,6 +177,8 @@ executor.shutdownNow();
 For Spring Boot applications, use auto-configuration:
 
 ```java
+import com.pool.adapter.spring.EnablePool;
+
 @SpringBootApplication
 @EnablePool
 public class MyApplication {
@@ -175,7 +209,17 @@ public class OrderService {
 
 ## Configuration Reference
 
-### Executor Settings
+### Scheduler Settings
+
+Path: `pool.scheduler`
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `queue-capacity` | 1000 | Scheduler queue capacity |
+
+### Executor Settings (Adapter)
+
+Path: `pool.adapters.executor`
 
 | Property | Default | Description |
 |----------|---------|-------------|
@@ -389,6 +433,66 @@ And these tasks submitted:
 
 ---
 
+## Architecture Design (Prioritization-First)
+
+This design makes the prioritization engine reusable beyond the in-memory executor, while keeping the current thread-pool behavior as one adapter.
+
+### Core Components
+
+**1) Priority Engine (pure, no scheduling/execution)**  
+Evaluates policy and produces `EvaluationResult` / `PriorityKey`.
+
+**2) Priority Scheduler (local ordering only)**  
+Stores submitted items and orders by priority. No workers. Provides `submit()` and `getNext()`.
+
+**3) Adapters (execution/transport)**  
+Consume from the priority scheduler and either execute locally or forward to external systems.
+
+### Package Organization Plan (Doc-Only)
+
+To make prioritization the primary identity, keep core logic in `com.pool.*` and move execution integrations under `com.pool.adapter.*`.
+
+**Proposed packages**
+- `com.pool.core` — core engine types and context (`TaskContext`, `TaskContextFactory`)
+- `com.pool.policy` — policy evaluation (`DefaultPolicyEngine`)
+- `com.pool.priority` — priority keys, vectors, calculators
+- `com.pool.scheduler` — priority scheduler API and default implementation
+- `com.pool.adapter.executor` — in-process thread pool executor
+- `com.pool.adapter.spring` — Spring Boot auto-configuration
+
+**Impact**
+- Thread-pool execution is clearly an adapter.
+- Priority scheduler becomes the main entry point in docs.
+- Integration-specific code is isolated from core prioritization.
+
+### Interface Sketch (conceptual)
+
+- `PriorityEngine`
+  - `EvaluationResult evaluate(TaskContext ctx)`
+  - `void updateConfig(PoolConfig cfg)` (optional)
+- `PriorityScheduler<T>`
+  - `boolean submit(TaskContext ctx, T payload)`
+  - `T getNext()`
+  - `Optional<T> getNext(long timeout, TimeUnit unit)`
+  - `int size()`, `int remainingCapacity()`
+- `PriorityAdapter<T>`
+  - `submit(...)` + adapter-specific handling (execute or forward)
+
+### Example Flows
+
+**A) In-memory execution (current behavior)**  
+`submit` → priority scheduler → worker threads execute.
+
+**B) Kafka/External queue relay**  
+`submit` → priority scheduler → `getNext` → publish to Kafka/Redis/SQS, etc.
+
+### Notes
+
+- Priority is guaranteed within the local scheduler. External systems can preserve ordering by using a simple priority queue based on the provided `PriorityKey`.
+- Host services are responsible for config reload and calling `updateConfig()` or recreating the engine.
+
+---
+
 ## Variables
 
 Variables are resolved at task submission time:
@@ -467,10 +571,14 @@ type: IS_NULL      # Field is null/missing
 ```yaml
 pool:
   name: "order-pool"
-  
-  executor:
-    core-pool-size: 20
-    max-pool-size: 100
+
+  scheduler:
+    queue-capacity: 1000
+
+  adapters:
+    executor:
+      core-pool-size: 20
+      max-pool-size: 100
     
   priority-tree:
     # VIP customers with large orders
@@ -544,6 +652,43 @@ TaskContext ctx = TaskContextFactory.create(jsonPayload, contextMap);
 
 // Create with specific task ID
 TaskContext ctx = TaskContextFactory.create("task-123", jsonPayload, contextMap);
+```
+
+### PriorityScheduler (External Integration)
+
+Use the in-memory priority scheduler to integrate with external systems (Kafka/Redis/etc.).
+It evaluates policy and delegates ordering to the configured `PriorityStrategy` (currently FIFO).
+
+```java
+PoolConfig config = ConfigLoader.load("classpath:pool.yaml");
+PriorityScheduler<MyPayload> scheduler = new DefaultPriorityScheduler<>(config);
+
+scheduler.submit(ctx, payload);
+
+// Pull highest priority payload
+MyPayload next = scheduler.getNext();
+```
+
+#### Example: Relay to Kafka
+
+```java
+PoolConfig config = ConfigLoader.load("classpath:pool.yaml");
+PriorityScheduler<OrderEvent> scheduler = new DefaultPriorityScheduler<>(config);
+
+// Submit events as they arrive
+scheduler.submit(ctx, orderEvent);
+
+// Relay loop (single-threaded example)
+while (true) {
+    OrderEvent event = scheduler.getNext();
+
+    ProducerRecord<String, OrderEvent> record = new ProducerRecord<>(
+            "orders",
+            "priority",
+            event
+    );
+    kafkaProducer.send(record);
+}
 ```
 
 ## Requirements

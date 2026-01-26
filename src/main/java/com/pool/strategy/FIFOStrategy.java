@@ -1,6 +1,6 @@
 package com.pool.strategy;
 
-import com.pool.core.PrioritizedTask;
+import com.pool.core.PrioritizedPayload;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,7 +29,7 @@ public class FIFOStrategy implements PriorityStrategy {
     private static final Logger log = LoggerFactory.getLogger(FIFOStrategy.class);
 
     private final int capacity;
-    private final PriorityBlockingQueue<PrioritizedTask<?>> queue;
+    private final PriorityBlockingQueue<PrioritizedPayload<?>> queue;
     private final Semaphore capacitySemaphore;
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
 
@@ -49,7 +49,7 @@ public class FIFOStrategy implements PriorityStrategy {
     }
 
     @Override
-    public boolean enqueue(PrioritizedTask<?> task) {
+    public boolean enqueue(PrioritizedPayload<?> task) {
         if (shutdown.get()) {
             log.warn("Strategy is shutdown, rejecting task: {}", task.getTaskId());
             return false;
@@ -72,16 +72,16 @@ public class FIFOStrategy implements PriorityStrategy {
     }
 
     @Override
-    public PrioritizedTask<?> takeNext() throws InterruptedException {
-        PrioritizedTask<?> task = queue.take();
+    public PrioritizedPayload<?> takeNext() throws InterruptedException {
+        PrioritizedPayload<?> task = queue.take();
         capacitySemaphore.release();
         log.trace("Task {} dequeued (blocking), queue size: {}", task.getTaskId(), queue.size());
         return task;
     }
 
     @Override
-    public Optional<PrioritizedTask<?>> pollNext() {
-        PrioritizedTask<?> task = queue.poll();
+    public Optional<PrioritizedPayload<?>> pollNext() {
+        PrioritizedPayload<?> task = queue.poll();
         if (task != null) {
             capacitySemaphore.release();
             log.trace("Task {} dequeued (poll), queue size: {}", task.getTaskId(), queue.size());
@@ -90,8 +90,8 @@ public class FIFOStrategy implements PriorityStrategy {
     }
 
     @Override
-    public Optional<PrioritizedTask<?>> pollNext(long timeout, TimeUnit unit) throws InterruptedException {
-        PrioritizedTask<?> task = queue.poll(timeout, unit);
+    public Optional<PrioritizedPayload<?>> pollNext(long timeout, TimeUnit unit) throws InterruptedException {
+        PrioritizedPayload<?> task = queue.poll(timeout, unit);
         if (task != null) {
             capacitySemaphore.release();
             log.trace("Task {} dequeued (timed poll), queue size: {}", task.getTaskId(), queue.size());
