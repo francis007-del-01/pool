@@ -184,6 +184,11 @@ public class OrderService {
 | `queue-capacity` | 1000 | Task queue capacity |
 | `keep-alive-seconds` | 60 | Idle thread timeout |
 | `thread-name-prefix` | "pool-" | Thread naming prefix |
+| `allow-core-thread-timeout` | true | Allow core threads to time out when idle |
+
+### Priority Strategy
+
+Pool currently supports `FIFO` only. Other types (`TIME_BASED`, `BUCKET_BASED`) are reserved for future implementations and will raise a configuration error if selected.
 
 ### Priority Tree
 

@@ -15,7 +15,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -38,7 +37,6 @@ public class DefaultPoolExecutor implements PoolExecutor {
     private final AtomicInteger rejectedCount = new AtomicInteger(0);
     private final AtomicInteger activeCount = new AtomicInteger(0);
     private final AtomicInteger workerCount = new AtomicInteger(0);
-    private final Semaphore workerSemaphore;
     private final ExecutorConfig execConfig;
 
     public DefaultPoolExecutor(PoolConfig config) {
@@ -57,11 +55,10 @@ public class DefaultPoolExecutor implements PoolExecutor {
 
         // Create worker threads
         this.workers = new ArrayList<>();
-        this.workerSemaphore = new Semaphore(execConfig.maxPoolSize());
 
         // Start core worker threads
         for (int i = 0; i < execConfig.corePoolSize(); i++) {
-            startWorker(i + 1, true);  // Core threads never time out
+            startWorker(i + 1, true);
         }
 
         log.info("PoolExecutor initialized: {} (strategy={}, core={}, max={}, queueCapacity={})",
@@ -294,7 +291,7 @@ public class DefaultPoolExecutor implements PoolExecutor {
 
     /**
      * Worker thread that pulls tasks from the priority strategy.
-     * Core threads block indefinitely; excess threads time out after keep-alive period.
+     * Core threads block indefinitely unless allow-core-thread-timeout is enabled.
      */
     private class WorkerThread extends Thread {
 
@@ -316,11 +313,12 @@ public class DefaultPoolExecutor implements PoolExecutor {
                 try {
                     PrioritizedTask<?> task;
 
-                    if (isCoreThread) {
+                    boolean allowCoreTimeout = execConfig.allowCoreThreadTimeout();
+                    if (isCoreThread && !allowCoreTimeout) {
                         // Core threads block indefinitely
                         task = priorityStrategy.takeNext();
                     } else {
-                        // Excess threads use timed poll - exit if idle too long
+                        // Timed poll - exit if idle too long
                         var optionalTask = priorityStrategy.pollNext(
                                 execConfig.keepAliveSeconds(), TimeUnit.SECONDS);
 
