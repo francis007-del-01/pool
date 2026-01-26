@@ -103,6 +103,11 @@ public class PoolApplication {
             log.info("=== Pool Demo Completed ===");
             log.info("Queue size: {}, Active threads: {}", 
                     poolExecutor.getQueueSize(), poolExecutor.getActiveCount());
+
+            // Shutdown the executor and exit (for demo purposes)
+            poolExecutor.shutdown();
+            poolExecutor.awaitTermination(10, TimeUnit.SECONDS);
+            System.exit(0);
         };
     }
 }
