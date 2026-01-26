@@ -7,7 +7,7 @@ pool:
     core-pool-size: 10
     max-pool-size: 50
     queue-capacity: 1000
-    keep-alive-seconds: 60
+    keep-alive-seconds: 5      # Short timeout for demo (5 seconds)
     thread-name-prefix: "pool-worker-"
     allow-core-thread-timeout: true
 

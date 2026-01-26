@@ -3,6 +3,7 @@ package com.pool.strategy;
 import com.pool.core.PrioritizedTask;
 
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Strategy interface for task selection at execution time.
@@ -45,6 +46,17 @@ public interface PriorityStrategy {
      * @return The next task, or empty if queue is empty
      */
     Optional<PrioritizedTask<?>> pollNext();
+
+    /**
+     * Select and remove the next task to execute with timeout.
+     * Used for thread scale-down: if no task arrives within timeout, worker can exit.
+     *
+     * @param timeout Maximum time to wait
+     * @param unit    Time unit
+     * @return The next task, or empty if timeout elapsed
+     * @throws InterruptedException if interrupted while waiting
+     */
+    Optional<PrioritizedTask<?>> pollNext(long timeout, TimeUnit unit) throws InterruptedException;
 
     /**
      * Get the current queue depth.

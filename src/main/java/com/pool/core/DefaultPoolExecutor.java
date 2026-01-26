@@ -37,6 +37,7 @@ public class DefaultPoolExecutor implements PoolExecutor {
     private final AtomicInteger completedCount = new AtomicInteger(0);
     private final AtomicInteger rejectedCount = new AtomicInteger(0);
     private final AtomicInteger activeCount = new AtomicInteger(0);
+    private final AtomicInteger workerCount = new AtomicInteger(0);
     private final Semaphore workerSemaphore;
     private final ExecutorConfig execConfig;
 
@@ -60,7 +61,7 @@ public class DefaultPoolExecutor implements PoolExecutor {
 
         // Start core worker threads
         for (int i = 0; i < execConfig.corePoolSize(); i++) {
-            startWorker(i + 1);
+            startWorker(i + 1, true);  // Core threads never time out
         }
 
         log.info("PoolExecutor initialized: {} (strategy={}, core={}, max={}, queueCapacity={})",
@@ -69,11 +70,22 @@ public class DefaultPoolExecutor implements PoolExecutor {
                 execConfig.queueCapacity());
     }
 
-    private void startWorker(int workerId) {
-        WorkerThread worker = new WorkerThread(workerId);
-        workers.add(worker);
+    private void startWorker(int workerId, boolean isCoreThread) {
+        WorkerThread worker = new WorkerThread(workerId, isCoreThread);
+        synchronized (workers) {
+            workers.add(worker);
+        }
+        workerCount.incrementAndGet();
         worker.start();
-        log.debug("Started worker thread: {}", worker.getName());
+        log.debug("Started {} worker thread: {}", isCoreThread ? "core" : "excess", worker.getName());
+    }
+
+    private void removeWorker(WorkerThread worker) {
+        synchronized (workers) {
+            workers.remove(worker);
+        }
+        workerCount.decrementAndGet();
+        log.debug("Removed worker thread: {}", worker.getName());
     }
 
     @Override
@@ -148,14 +160,14 @@ public class DefaultPoolExecutor implements PoolExecutor {
      * Scale up workers if queue has items and we haven't hit max.
      */
     private void maybeScaleUp() {
-        int currentWorkers = workers.size();
+        int currentWorkers = workerCount.get();
         int queueSize = priorityStrategy.getQueueSize();
 
         // If queue has items and we have room for more workers
         if (queueSize > 0 && currentWorkers < execConfig.maxPoolSize()) {
             synchronized (workers) {
-                if (workers.size() < execConfig.maxPoolSize() && !shutdown.get()) {
-                    startWorker(workers.size() + 1);
+                if (workerCount.get() < execConfig.maxPoolSize() && !shutdown.get()) {
+                    startWorker(workerCount.get() + 1, false);  // Excess threads can time out
                 }
             }
         }
@@ -246,10 +258,17 @@ public class DefaultPoolExecutor implements PoolExecutor {
                 rejectedCount.get(),
                 priorityStrategy.getQueueSize(),
                 activeCount.get(),
-                workers.size(),
+                workerCount.get(),
                 execConfig.maxPoolSize(),
                 priorityStrategy.getName()
         );
+    }
+
+    /**
+     * Get current worker count.
+     */
+    public int getWorkerCount() {
+        return workerCount.get();
     }
 
     /**
@@ -275,25 +294,44 @@ public class DefaultPoolExecutor implements PoolExecutor {
 
     /**
      * Worker thread that pulls tasks from the priority strategy.
+     * Core threads block indefinitely; excess threads time out after keep-alive period.
      */
     private class WorkerThread extends Thread {
 
         private final int workerId;
+        private final boolean isCoreThread;
 
-        WorkerThread(int workerId) {
+        WorkerThread(int workerId, boolean isCoreThread) {
             super(execConfig.threadNamePrefix() + workerId);
             this.workerId = workerId;
+            this.isCoreThread = isCoreThread;
             setDaemon(false);
         }
 
         @Override
         public void run() {
-            log.debug("Worker {} started", workerId);
+            log.debug("Worker {} started (core={})", workerId, isCoreThread);
 
             while (!shutdown.get()) {
                 try {
-                    // Get next task from strategy (blocks if empty)
-                    PrioritizedTask<?> task = priorityStrategy.takeNext();
+                    PrioritizedTask<?> task;
+
+                    if (isCoreThread) {
+                        // Core threads block indefinitely
+                        task = priorityStrategy.takeNext();
+                    } else {
+                        // Excess threads use timed poll - exit if idle too long
+                        var optionalTask = priorityStrategy.pollNext(
+                                execConfig.keepAliveSeconds(), TimeUnit.SECONDS);
+
+                        if (optionalTask.isEmpty()) {
+                            // Timeout - no work available, scale down
+                            log.debug("Worker {} idle for {}s, scaling down",
+                                    workerId, execConfig.keepAliveSeconds());
+                            break;
+                        }
+                        task = optionalTask.get();
+                    }
 
                     activeCount.incrementAndGet();
                     try {
@@ -323,6 +361,11 @@ public class DefaultPoolExecutor implements PoolExecutor {
                     }
                     Thread.currentThread().interrupt();
                 }
+            }
+
+            // Remove self from workers list if not shutting down
+            if (!shutdown.get()) {
+                removeWorker(this);
             }
 
             log.debug("Worker {} stopped", workerId);

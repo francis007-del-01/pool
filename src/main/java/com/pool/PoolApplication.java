@@ -1,5 +1,6 @@
 package com.pool;
 
+import com.pool.core.DefaultPoolExecutor;
 import com.pool.core.PoolExecutor;
 import com.pool.core.TaskContext;
 import com.pool.core.TaskContextFactory;
@@ -11,6 +12,8 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -33,76 +36,46 @@ public class PoolApplication {
         return args -> {
             log.info("=== Pool Demo Started ===");
 
+            DefaultPoolExecutor executor = (DefaultPoolExecutor) poolExecutor;
+            log.info("Initial worker count: {}", executor.getWorkerCount());
+
             // Context (simulating headers/metadata)
             Map<String, String> context = Map.of("clientId", "demo-app");
 
-            // Submit some tasks with different priorities
-            
-            // High priority: NORTH_AMERICA + PLATINUM + HIGH_VALUE
-            String json1 = """
-                {
-                    "region": "NORTH_AMERICA",
-                    "customerTier": "PLATINUM",
-                    "transactionAmount": 500000.0,
-                    "priority": 95
-                }
-                """;
-            TaskContext ctx1 = TaskContextFactory.create(json1, context);
-            Future<String> task1 = poolExecutor.submit(ctx1, () -> {
-                Thread.sleep(100);
-                return "Task 1 completed (NA/PLATINUM/HIGH_VALUE)";
-            });
+            // Submit 20 tasks to trigger scale-up (more than core pool size of 10)
+            List<Future<String>> futures = new ArrayList<>();
+            for (int i = 0; i < 20; i++) {
+                String json = """
+                    {
+                        "region": "NORTH_AMERICA",
+                        "customerTier": "GOLD",
+                        "taskNumber": %d
+                    }
+                    """.formatted(i);
+                TaskContext ctx = TaskContextFactory.create(json, context);
+                int taskNum = i;
+                futures.add(executor.submit(ctx, () -> {
+                    Thread.sleep(500);  // Simulate work
+                    return "Task " + taskNum + " completed";
+                }));
+            }
 
-            // Medium priority: NORTH_AMERICA + GOLD
-            String json2 = """
-                {
-                    "region": "NORTH_AMERICA",
-                    "customerTier": "GOLD",
-                    "transactionAmount": 5000.0
-                }
-                """;
-            TaskContext ctx2 = TaskContextFactory.create(json2, context);
-            Future<String> task2 = poolExecutor.submit(ctx2, () -> {
-                Thread.sleep(100);
-                return "Task 2 completed (NA/GOLD)";
-            });
-
-            // Lower priority: EUROPE + DEFAULT
-            String json3 = """
-                {
-                    "region": "EUROPE",
-                    "customerTier": "SILVER",
-                    "priority": 80
-                }
-                """;
-            TaskContext ctx3 = TaskContextFactory.create(json3, context);
-            Future<String> task3 = poolExecutor.submit(ctx3, () -> {
-                Thread.sleep(100);
-                return "Task 3 completed (EUROPE)";
-            });
-
-            // Lowest priority: DEFAULT region
-            String json4 = """
-                {
-                    "region": "ASIA_PACIFIC",
-                    "customerTier": "BRONZE"
-                }
-                """;
-            TaskContext ctx4 = TaskContextFactory.create(json4, context);
-            Future<String> task4 = poolExecutor.submit(ctx4, () -> {
-                Thread.sleep(100);
-                return "Task 4 completed (ASIA-PACIFIC)";
-            });
+            log.info("After submitting 20 tasks, worker count: {}", executor.getWorkerCount());
 
             // Wait for all tasks to complete
-            log.info("Result: {}", task1.get(5, TimeUnit.SECONDS));
-            log.info("Result: {}", task2.get(5, TimeUnit.SECONDS));
-            log.info("Result: {}", task3.get(5, TimeUnit.SECONDS));
-            log.info("Result: {}", task4.get(5, TimeUnit.SECONDS));
+            for (int i = 0; i < futures.size(); i++) {
+                log.info("Result: {}", futures.get(i).get(10, TimeUnit.SECONDS));
+            }
 
-            log.info("=== Pool Demo Completed ===");
-            log.info("Queue size: {}, Active threads: {}", 
-                    poolExecutor.getQueueSize(), poolExecutor.getActiveCount());
+            log.info("=== All Tasks Completed ===");
+            log.info("Worker count after tasks: {}", executor.getWorkerCount());
+
+            // Wait for scale-down (keep-alive is 5 seconds in config)
+            log.info("Waiting 7 seconds for excess threads to scale down...");
+            Thread.sleep(7000);
+
+            log.info("Worker count after scale-down: {}", executor.getWorkerCount());
+            log.info("(Should be back to core pool size of 10)");
 
             // Shutdown the executor and exit (for demo purposes)
             poolExecutor.shutdown();

@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Optional;
 import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -76,6 +77,15 @@ public class FIFOStrategy implements PriorityStrategy {
         PrioritizedTask<?> task = queue.poll();
         if (task != null) {
             log.trace("Task {} dequeued (poll), queue size: {}", task.getTaskId(), queue.size());
+        }
+        return Optional.ofNullable(task);
+    }
+
+    @Override
+    public Optional<PrioritizedTask<?>> pollNext(long timeout, TimeUnit unit) throws InterruptedException {
+        PrioritizedTask<?> task = queue.poll(timeout, unit);
+        if (task != null) {
+            log.trace("Task {} dequeued (timed poll), queue size: {}", task.getTaskId(), queue.size());
         }
         return Optional.ofNullable(task);
     }
