@@ -207,6 +207,181 @@ priority-tree:
           direction: DESC
 ```
 
+---
+
+## How Priority Tree & Vector Comparison Works
+
+This is the core algorithm that makes Pool powerful. Understanding this helps you design effective prioritization rules.
+
+### The Priority Tree Structure
+
+The priority tree is a **hierarchical decision tree** where each level represents a prioritization dimension. Think of it like a multi-level sorting system:
+
+```
+Level 1: Region          Level 2: Customer Tier    Level 3: Transaction Size
+┌─────────────────┐      ┌──────────────────┐      ┌─────────────────┐
+│ 1. NORTH_AMERICA│──────│ 1. PLATINUM      │──────│ 1. HIGH_VALUE   │
+│ 2. EUROPE       │      │ 2. GOLD          │      │ 2. DEFAULT      │
+│ 3. DEFAULT      │      │ 3. DEFAULT       │      └─────────────────┘
+└─────────────────┘      └──────────────────┘
+```
+
+### Path Matching
+
+When a task is submitted, Pool traverses the tree to find the **first matching path**:
+
+```yaml
+priority-tree:
+  - name: "L1.NORTH_AMERICA"        # Index 1 at Level 1
+    condition:
+      type: EQUALS
+      field: $req.region
+      value: "NORTH_AMERICA"
+    nested-levels:
+      - name: "L2.PLATINUM"         # Index 1 at Level 2
+        condition:
+          type: EQUALS
+          field: $req.customerTier
+          value: "PLATINUM"
+        nested-levels:
+          - name: "L3.HIGH_VALUE"   # Index 1 at Level 3
+            condition:
+              type: GREATER_THAN
+              field: $req.amount
+              value: 100000
+            sort-by:
+              field: $req.priority
+              direction: DESC
+```
+
+**Example**: A task with `{region: "NORTH_AMERICA", customerTier: "PLATINUM", amount: 500000}` would match:
+```
+Path: L1.NORTH_AMERICA → L2.PLATINUM → L3.HIGH_VALUE
+```
+
+### The Path Vector
+
+Each matched path is converted to a **Path Vector** - an array of indices representing which branch was taken at each level:
+
+| Task | Matched Path | Path Vector |
+|------|--------------|-------------|
+| NA + Platinum + High Value | L1.NORTH_AMERICA → L2.PLATINUM → L3.HIGH_VALUE | `[1, 1, 1]` |
+| NA + Platinum + Default | L1.NORTH_AMERICA → L2.PLATINUM → L3.DEFAULT | `[1, 1, 2]` |
+| NA + Gold + Default | L1.NORTH_AMERICA → L2.GOLD → L3.DEFAULT | `[1, 2, 1]` |
+| Europe + Default + Default | L1.EUROPE → L2.DEFAULT → L3.DEFAULT | `[2, 1, 1]` |
+| Asia + Default + Default | L1.DEFAULT → L2.DEFAULT → L3.DEFAULT | `[3, 1, 1]` |
+
+### Vector Comparison (Lexicographic)
+
+Tasks are ordered by comparing their path vectors **lexicographically** (like dictionary sorting):
+
+```
+[1, 1, 1] < [1, 1, 2] < [1, 2, 1] < [2, 1, 1] < [3, 1, 1]
+   ↑           ↑           ↑           ↑           ↑
+ Highest    Second      Third       Fourth      Lowest
+Priority   Priority    Priority    Priority    Priority
+```
+
+**Comparison Rules:**
+1. Compare first element: lower wins
+2. If equal, compare second element
+3. Continue until a difference is found
+4. **Lower values = Higher priority**
+
+**Example Comparisons:**
+```
+[1, 1, 1] vs [1, 2, 1]  → [1, 1, 1] wins (1 < 2 at position 2)
+[1, 2, 1] vs [2, 1, 1]  → [1, 2, 1] wins (1 < 2 at position 1)
+[2, 1, 1] vs [2, 1, 2]  → [2, 1, 1] wins (1 < 2 at position 3)
+```
+
+### Within-Bucket Ordering (sort-by)
+
+When multiple tasks have the **same path vector** (same bucket), they're ordered by the `sort-by` field defined at the leaf node:
+
+```yaml
+- name: "L3.HIGH_VALUE"
+  condition:
+    type: GREATER_THAN
+    field: $req.amount
+    value: 100000
+  sort-by:
+    field: $req.priority    # Sort by this field within this bucket
+    direction: DESC         # Higher priority values first
+```
+
+**Example**: Three tasks all match `[1, 1, 1]`:
+| Task | priority | Order |
+|------|----------|-------|
+| Task A | 95 | 1st (highest priority) |
+| Task B | 80 | 2nd |
+| Task C | 50 | 3rd |
+
+### Complete Priority Calculation
+
+The final priority is determined by:
+
+1. **Primary**: Path Vector (which bucket)
+2. **Secondary**: Sort-by value (within bucket)
+
+```
+Final Order = PathVector comparison → then → SortBy comparison
+```
+
+### Visual Example
+
+Given this tree:
+```yaml
+priority-tree:
+  - name: "PLATINUM"       # Index 1
+    condition: { type: EQUALS, field: $req.tier, value: "PLATINUM" }
+    sort-by: { field: $req.priority, direction: DESC }
+    
+  - name: "GOLD"           # Index 2
+    condition: { type: EQUALS, field: $req.tier, value: "GOLD" }
+    sort-by: { field: $sys.submittedAt, direction: ASC }
+    
+  - name: "DEFAULT"        # Index 3
+    condition: { type: ALWAYS_TRUE }
+    sort-by: { field: $sys.submittedAt, direction: ASC }
+```
+
+And these tasks submitted:
+| Task | tier | priority | submittedAt | Path Vector | Bucket Order |
+|------|------|----------|-------------|-------------|--------------|
+| T1 | PLATINUM | 90 | 1000 | `[1]` | 2nd in bucket |
+| T2 | PLATINUM | 95 | 1001 | `[1]` | 1st in bucket |
+| T3 | GOLD | - | 999 | `[2]` | 1st in bucket |
+| T4 | GOLD | - | 1002 | `[2]` | 2nd in bucket |
+| T5 | SILVER | - | 998 | `[3]` | 1st in bucket |
+
+**Execution Order**: T2 → T1 → T3 → T4 → T5
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Bucket [1] PLATINUM     │  Bucket [2] GOLD  │ Bucket [3]   │
+│  (sorted by priority↓)   │  (sorted by time↑)│ DEFAULT      │
+│  ┌─────┐ ┌─────┐         │  ┌─────┐ ┌─────┐  │ ┌─────┐      │
+│  │ T2  │ │ T1  │         │  │ T3  │ │ T4  │  │ │ T5  │      │
+│  │p=95 │ │p=90 │         │  │t=999│ │t=1002│ │ │t=998│      │
+│  └─────┘ └─────┘         │  └─────┘ └─────┘  │ └─────┘      │
+│     ↓       ↓            │     ↓       ↓     │    ↓         │
+└─────────────────────────────────────────────────────────────┘
+        1st     2nd              3rd     4th        5th
+```
+
+### Design Tips
+
+1. **Put highest priority conditions first** - They get lower indices (higher priority)
+2. **Always end with ALWAYS_TRUE** - Catch-all for unmatched tasks
+3. **Use nested-levels for multi-dimensional priority** - Region → Tier → Amount
+4. **Choose sort-by wisely**:
+   - `$req.priority DESC` - User-provided priority
+   - `$sys.submittedAt ASC` - FIFO within bucket
+   - `$req.amount DESC` - Highest value first
+
+---
+
 ## Variables
 
 Variables are resolved at task submission time:
