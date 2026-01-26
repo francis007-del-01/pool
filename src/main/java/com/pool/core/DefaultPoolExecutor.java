@@ -13,7 +13,10 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.*;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -74,12 +77,45 @@ public class DefaultPoolExecutor implements PoolExecutor {
     }
 
     @Override
-    public <T> Future<T> submit(Callable<T> task, TaskContext context) {
+    public void submit(TaskContext context, Runnable task) {
+        if (context == null) {
+            throw new NullPointerException("Context cannot be null");
+        }
         if (task == null) {
             throw new NullPointerException("Task cannot be null");
         }
+        if (shutdown.get()) {
+            throw new TaskRejectedException("Executor is shutdown");
+        }
+
+        // Evaluate priority
+        EvaluationResult result = policyEngine.evaluate(context);
+
+        // Create prioritized task
+        PrioritizedTask<?> prioritizedTask = new PrioritizedTask<>(task, context, result);
+
+        // Enqueue to strategy
+        if (!priorityStrategy.enqueue(prioritizedTask)) {
+            rejectedCount.incrementAndGet();
+            throw new TaskRejectedException("Queue is full, task rejected: " + context.getTaskId());
+        }
+
+        submittedCount.incrementAndGet();
+        log.debug("Task {} submitted with priority {} (queue size: {})",
+                context.getTaskId(), result.getPriorityKey().getPathVector(),
+                priorityStrategy.getQueueSize());
+
+        // Scale up workers if needed
+        maybeScaleUp();
+    }
+
+    @Override
+    public <T> Future<T> submit(TaskContext context, Callable<T> task) {
         if (context == null) {
             throw new NullPointerException("Context cannot be null");
+        }
+        if (task == null) {
+            throw new NullPointerException("Task cannot be null");
         }
         if (shutdown.get()) {
             throw new TaskRejectedException("Executor is shutdown");
@@ -106,39 +142,6 @@ public class DefaultPoolExecutor implements PoolExecutor {
         maybeScaleUp();
 
         return prioritizedTask;
-    }
-
-    @Override
-    public void execute(Runnable task, TaskContext context) {
-        if (task == null) {
-            throw new NullPointerException("Task cannot be null");
-        }
-        if (context == null) {
-            throw new NullPointerException("Context cannot be null");
-        }
-        if (shutdown.get()) {
-            throw new TaskRejectedException("Executor is shutdown");
-        }
-
-        // Evaluate priority
-        EvaluationResult result = policyEngine.evaluate(context);
-
-        // Create prioritized task
-        PrioritizedTask<?> prioritizedTask = new PrioritizedTask<>(task, context, result);
-
-        // Enqueue to strategy
-        if (!priorityStrategy.enqueue(prioritizedTask)) {
-            rejectedCount.incrementAndGet();
-            throw new TaskRejectedException("Queue is full, task rejected: " + context.getTaskId());
-        }
-
-        submittedCount.incrementAndGet();
-        log.debug("Task {} submitted with priority {} (queue size: {})",
-                context.getTaskId(), result.getPriorityKey().getPathVector(),
-                priorityStrategy.getQueueSize());
-
-        // Scale up workers if needed
-        maybeScaleUp();
     }
 
     /**
@@ -188,6 +191,22 @@ public class DefaultPoolExecutor implements PoolExecutor {
     }
 
     @Override
+    public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
+        long deadline = System.nanoTime() + unit.toNanos(timeout);
+        for (WorkerThread worker : workers) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) {
+                return false;
+            }
+            worker.join(TimeUnit.NANOSECONDS.toMillis(remaining));
+            if (worker.isAlive()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @Override
     public boolean isTerminated() {
         if (!shutdown.get()) {
             return false;
@@ -208,12 +227,6 @@ public class DefaultPoolExecutor implements PoolExecutor {
     @Override
     public int getActiveCount() {
         return activeCount.get();
-    }
-
-    @Override
-    public void reloadConfig() {
-        log.info("Reloading configuration for PoolExecutor: {}", config.name());
-        policyEngine.reload();
     }
 
     /**

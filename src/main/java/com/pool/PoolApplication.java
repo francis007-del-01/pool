@@ -2,6 +2,7 @@ package com.pool;
 
 import com.pool.core.PoolExecutor;
 import com.pool.core.TaskContext;
+import com.pool.core.TaskContextFactory;
 import com.pool.spring.EnablePool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,6 +11,7 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 
+import java.util.Map;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
@@ -31,51 +33,66 @@ public class PoolApplication {
         return args -> {
             log.info("=== Pool Demo Started ===");
 
+            // Context (simulating headers/metadata)
+            Map<String, String> context = Map.of("clientId", "demo-app");
+
             // Submit some tasks with different priorities
             
             // High priority: NORTH_AMERICA + PLATINUM + HIGH_VALUE
-            Future<String> task1 = poolExecutor.submit(() -> {
+            String json1 = """
+                {
+                    "region": "NORTH_AMERICA",
+                    "customerTier": "PLATINUM",
+                    "transactionAmount": 500000.0,
+                    "priority": 95
+                }
+                """;
+            TaskContext ctx1 = TaskContextFactory.create(json1, context);
+            Future<String> task1 = poolExecutor.submit(ctx1, () -> {
                 Thread.sleep(100);
                 return "Task 1 completed (NA/PLATINUM/HIGH_VALUE)";
-            }, TaskContext.builder()
-                    .taskId("task-1")
-                    .requestVariable("region", "NORTH_AMERICA")
-                    .requestVariable("customerTier", "PLATINUM")
-                    .requestVariable("transactionAmount", 500000.0)
-                    .requestVariable("priority", 95)
-                    .build());
+            });
 
             // Medium priority: NORTH_AMERICA + GOLD
-            Future<String> task2 = poolExecutor.submit(() -> {
+            String json2 = """
+                {
+                    "region": "NORTH_AMERICA",
+                    "customerTier": "GOLD",
+                    "transactionAmount": 5000.0
+                }
+                """;
+            TaskContext ctx2 = TaskContextFactory.create(json2, context);
+            Future<String> task2 = poolExecutor.submit(ctx2, () -> {
                 Thread.sleep(100);
                 return "Task 2 completed (NA/GOLD)";
-            }, TaskContext.builder()
-                    .taskId("task-2")
-                    .requestVariable("region", "NORTH_AMERICA")
-                    .requestVariable("customerTier", "GOLD")
-                    .requestVariable("transactionAmount", 5000.0)
-                    .build());
+            });
 
             // Lower priority: EUROPE + DEFAULT
-            Future<String> task3 = poolExecutor.submit(() -> {
+            String json3 = """
+                {
+                    "region": "EUROPE",
+                    "customerTier": "SILVER",
+                    "priority": 80
+                }
+                """;
+            TaskContext ctx3 = TaskContextFactory.create(json3, context);
+            Future<String> task3 = poolExecutor.submit(ctx3, () -> {
                 Thread.sleep(100);
                 return "Task 3 completed (EUROPE)";
-            }, TaskContext.builder()
-                    .taskId("task-3")
-                    .requestVariable("region", "EUROPE")
-                    .requestVariable("customerTier", "SILVER")
-                    .requestVariable("priority", 80)
-                    .build());
+            });
 
             // Lowest priority: DEFAULT region
-            Future<String> task4 = poolExecutor.submit(() -> {
+            String json4 = """
+                {
+                    "region": "ASIA_PACIFIC",
+                    "customerTier": "BRONZE"
+                }
+                """;
+            TaskContext ctx4 = TaskContextFactory.create(json4, context);
+            Future<String> task4 = poolExecutor.submit(ctx4, () -> {
                 Thread.sleep(100);
                 return "Task 4 completed (ASIA-PACIFIC)";
-            }, TaskContext.builder()
-                    .taskId("task-4")
-                    .requestVariable("region", "ASIA_PACIFIC")
-                    .requestVariable("customerTier", "BRONZE")
-                    .build());
+            });
 
             // Wait for all tasks to complete
             log.info("Result: {}", task1.get(5, TimeUnit.SECONDS));
