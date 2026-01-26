@@ -1,0 +1,117 @@
+pool:
+  name: "example-pool"
+  version: "1.0"
+
+  # Thread pool executor configuration
+  executor:
+    core-pool-size: 10
+    max-pool-size: 50
+    queue-capacity: 1000
+    keep-alive-seconds: 60
+    thread-name-prefix: "pool-worker-"
+    allow-core-thread-timeout: true
+
+  # Priority Strategy Configuration
+  # Controls how tasks are selected at execution time
+  # Available types: FIFO (current), TIME_BASED (future), BUCKET_BASED (future)
+  priority-strategy:
+    type: FIFO
+    # Future: TIME_BASED config
+    # time-based:
+    #   aging-interval-ms: 5000      # How often to boost waiting tasks
+    #   boost-per-interval: 1        # Priority boost per interval
+    #   max-boost: 100               # Maximum total boost
+    # Future: BUCKET_BASED config
+    # bucket-based:
+    #   bucket-count: 4
+    #   bucket-capacities: [100, 500, 2000, -1]  # -1 = unlimited
+    #   promotion-interval-ms: 10000
+
+  # Priority tree (4 levels in this example)
+  priority-tree:
+    # Level 1: Region-based routing
+    - name: "L1.NORTH_AMERICA"
+      condition:
+        type: EQUALS
+        field: $req.region
+        value: "NORTH_AMERICA"
+      nested-levels:
+        # Level 2: Customer tier
+        - name: "L2.PLATINUM"
+          condition:
+            type: EQUALS
+            field: $req.customerTier
+            value: "PLATINUM"
+          nested-levels:
+            # Level 3: Transaction amount
+            - name: "L3.HIGH_VALUE"
+              condition:
+                type: GREATER_THAN
+                field: $req.transactionAmount
+                value: 100000
+              sort-by:
+                field: $req.priority
+                direction: DESC
+            - name: "L3.DEFAULT"
+              condition:
+                type: ALWAYS_TRUE
+              sort-by:
+                field: $req.urgency
+                direction: DESC
+
+        - name: "L2.GOLD"
+          condition:
+            type: EQUALS
+            field: $req.customerTier
+            value: "GOLD"
+          nested-levels:
+            - name: "L3.DEFAULT"
+              condition:
+                type: ALWAYS_TRUE
+              sort-by:
+                field: $sys.submittedAt
+                direction: ASC
+
+        - name: "L2.DEFAULT"
+          condition:
+            type: ALWAYS_TRUE
+          nested-levels:
+            - name: "L3.DEFAULT"
+              condition:
+                type: ALWAYS_TRUE
+              sort-by:
+                field: $sys.submittedAt
+                direction: ASC
+
+    - name: "L1.EUROPE"
+      condition:
+        type: EQUALS
+        field: $req.region
+        value: "EUROPE"
+      nested-levels:
+        - name: "L2.DEFAULT"
+          condition:
+            type: ALWAYS_TRUE
+          nested-levels:
+            - name: "L3.DEFAULT"
+              condition:
+                type: ALWAYS_TRUE
+              sort-by:
+                field: $req.priority
+                direction: DESC
+
+    # Catch-all for other regions
+    - name: "L1.DEFAULT"
+      condition:
+        type: ALWAYS_TRUE
+      nested-levels:
+        - name: "L2.DEFAULT"
+          condition:
+            type: ALWAYS_TRUE
+          nested-levels:
+            - name: "L3.DEFAULT"
+              condition:
+                type: ALWAYS_TRUE
+              sort-by:
+                field: $sys.submittedAt
+                direction: ASC
