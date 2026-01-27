@@ -1,22 +1,43 @@
 package com.pool.config;
 
+import java.util.List;
+
 /**
- * Priority scheduler configuration.
+ * Configuration for the priority scheduler.
  *
- * @param queueCapacity Maximum queue capacity
+ * @param queues List of queue configurations
  */
-public record SchedulerConfig(int queueCapacity) {
+public record SchedulerConfig(
+        List<QueueConfig> queues
+) {
     /**
-     * Default scheduler configuration.
+     * Default scheduler config with a single default queue.
      */
     public static SchedulerConfig defaults() {
-        return new SchedulerConfig(1000);
+        return new SchedulerConfig(List.of(QueueConfig.defaults("default", 0)));
     }
 
     /**
-     * Create a minimal configuration for testing.
+     * Minimal config for testing.
      */
     public static SchedulerConfig minimal() {
-        return new SchedulerConfig(100);
+        return defaults();
+    }
+
+    /**
+     * Get total capacity across all queues.
+     */
+    public int totalCapacity() {
+        return queues.stream().mapToInt(QueueConfig::capacity).sum();
+    }
+
+    /**
+     * Find queue by name.
+     */
+    public QueueConfig getQueue(String name) {
+        return queues.stream()
+                .filter(q -> q.name().equals(name))
+                .findFirst()
+                .orElse(null);
     }
 }

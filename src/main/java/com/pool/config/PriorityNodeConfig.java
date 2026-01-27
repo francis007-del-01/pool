@@ -9,12 +9,14 @@ import java.util.List;
  * @param condition    Condition that must match for this node
  * @param nestedLevels Child nodes (null or empty = leaf node)
  * @param sortBy       Sort-by directive (only valid on leaf nodes)
+ * @param queue        Target queue name (only valid on leaf nodes)
  */
 public record PriorityNodeConfig(
         String name,
         ConditionConfig condition,
         List<PriorityNodeConfig> nestedLevels,
-        SortByConfig sortBy
+        SortByConfig sortBy,
+        String queue
 ) {
     /**
      * Check if this node is a leaf (no nested levels).

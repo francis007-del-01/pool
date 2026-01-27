@@ -12,6 +12,7 @@ Instead of simple FIFO queues, Pool uses a **priority tree** to dynamically rout
 
 - **No Code Changes for Priority Logic** - Change prioritization rules via YAML, no redeployment needed
 - **Business-Driven Ordering** - Prioritize by customer tier, transaction amount, region, or any field
+- **Multi-Queue Architecture** - Route tasks to different queues with independent worker pools
 - **Executor Adapter** - Optional in-process thread-pool adapter for drop-in use
 - **Framework Agnostic** - Works with Spring Boot, Micronaut, plain Java, or any JVM application
 
@@ -44,20 +45,34 @@ pool:
   name: "order-processing-pool"
   version: "1.0"
 
-  scheduler:
-    queue-capacity: 1000
-
+  # Multiple executors - each with its own queue and worker pool
   adapters:
-    executor:
-      core-pool-size: 10
-      max-pool-size: 50
-      queue-capacity: 1000
+    executors:
+      - core-pool-size: 10
+        max-pool-size: 50
+        keep-alive-seconds: 60
+        thread-name-prefix: "fast-worker-"
+        allow-core-thread-timeout: true
+        queue:
+          name: "fast"
+          index: 0          # Lower index = higher priority when polling
+          capacity: 1000
+
+      - core-pool-size: 5
+        max-pool-size: 20
+        keep-alive-seconds: 120
+        thread-name-prefix: "bulk-worker-"
+        allow-core-thread-timeout: true
+        queue:
+          name: "bulk"
+          index: 1
+          capacity: 500
 
   priority-strategy:
     type: FIFO
 
   priority-tree:
-    # Platinum customers get highest priority
+    # Platinum customers → fast queue
     - name: "PLATINUM"
       condition:
         type: EQUALS
@@ -66,8 +81,9 @@ pool:
       sort-by:
         field: $req.priority
         direction: DESC
+      queue: "fast"           # Route to fast queue
 
-    # High-value transactions next
+    # High-value transactions → fast queue
     - name: "HIGH_VALUE"
       condition:
         type: GREATER_THAN
@@ -76,17 +92,48 @@ pool:
       sort-by:
         field: $sys.submittedAt
         direction: ASC
+      queue: "fast"
 
-    # Everything else - FIFO
+    # Everything else → bulk queue
     - name: "DEFAULT"
       condition:
         type: ALWAYS_TRUE
       sort-by:
         field: $sys.submittedAt
         direction: ASC
+      queue: "bulk"           # Route to bulk queue
 ```
 
 ### 2. Initialize the Priority Scheduler (Recommended)
+
+For standalone use (without executor adapter), you can configure queues directly:
+
+```yaml
+# pool-scheduler.yaml - standalone scheduler config
+pool:
+  name: "my-scheduler"
+  
+  scheduler:
+    queues:
+      - name: "fast"
+        index: 0
+        capacity: 1000
+      - name: "bulk"
+        index: 1
+        capacity: 5000
+  
+  priority-tree:
+    - name: "HIGH_PRIORITY"
+      condition:
+        type: GREATER_THAN
+        field: $req.priority
+        value: 80
+      queue: "fast"
+    - name: "DEFAULT"
+      condition:
+        type: ALWAYS_TRUE
+      queue: "bulk"
+```
 
 ```java
 import com.pool.config.ConfigLoader;
@@ -95,9 +142,9 @@ import com.pool.scheduler.DefaultPriorityScheduler;
 import com.pool.scheduler.PriorityScheduler;
 
 // Load configuration
-PoolConfig config = ConfigLoader.load("classpath:pool.yaml");
+PoolConfig config = ConfigLoader.load("classpath:pool-scheduler.yaml");
 
-// Create priority scheduler
+// Create priority scheduler (supports multiple queues)
 PriorityScheduler<MyPayload> scheduler = new DefaultPriorityScheduler<>(config);
 ```
 
@@ -108,10 +155,15 @@ import com.pool.core.TaskContext;
 import com.pool.core.TaskContextFactory;
 
 TaskContext ctx = TaskContextFactory.create(jsonPayload, contextMap);
-scheduler.submit(ctx, payload);
 
-// Pull highest priority payload
+// submit() returns the queue name the task was routed to
+String queueName = scheduler.submit(ctx, payload);
+
+// Pull from first non-empty queue (by index order)
 MyPayload next = scheduler.getNext();
+
+// Or pull from a specific queue
+MyPayload fastTask = scheduler.getNext("fast");
 ```
 
 ### 4. Initialize the In-Process Executor (Adapter)
@@ -127,6 +179,7 @@ PoolConfig config = ConfigLoader.load("classpath:pool.yaml");
 // Or from file path: ConfigLoader.load("/etc/myapp/pool.yaml");
 
 // Create executor (adapter, uses PriorityScheduler internally)
+// Workers are automatically created per queue based on config
 PoolExecutor executor = new DefaultPoolExecutor(config);
 ```
 
@@ -155,7 +208,8 @@ Map<String, String> context = Map.of(
 // Create task context
 TaskContext taskContext = TaskContextFactory.create(jsonPayload, context);
 
-// Submit task - Pool handles prioritization automatically
+// Submit task - Pool routes to the correct queue automatically
+// Workers for that queue will pick it up
 executor.submit(taskContext, () -> {
     processOrder(taskContext);
 });
@@ -209,34 +263,90 @@ public class OrderService {
 
 ## Configuration Reference
 
-### Scheduler Settings
+### Multi-Queue Executor Configuration
+
+Path: `pool.adapters.executors[]`
+
+Each executor defines a queue and its worker pool:
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `core-pool-size` | 10 | Minimum number of worker threads for this queue |
+| `max-pool-size` | 50 | Maximum number of worker threads for this queue |
+| `keep-alive-seconds` | 60 | Idle thread timeout before excess threads terminate |
+| `thread-name-prefix` | "queue-name-worker-" | Thread naming prefix |
+| `allow-core-thread-timeout` | true | Allow core threads to time out when idle |
+| `queue.name` | required | Queue name (referenced in priority tree leaf nodes) |
+| `queue.index` | required | Priority index (lower = higher priority when polling) |
+| `queue.capacity` | 1000 | Maximum queue capacity |
+
+### Standalone Scheduler Configuration (No Adapter)
+
+If you only need the `PriorityScheduler` without the executor adapter (e.g., for Kafka relay), configure queues directly under `scheduler`:
 
 Path: `pool.scheduler`
 
+**Option 1: Single queue with capacity**
+
+```yaml
+pool:
+  name: "my-scheduler"
+  
+  scheduler:
+    queue-capacity: 1000    # Single "default" queue with this capacity
+  
+  priority-tree:
+    - name: "DEFAULT"
+      condition:
+        type: ALWAYS_TRUE
+      queue: "default"
+```
+
+**Option 2: Multiple named queues**
+
+```yaml
+pool:
+  name: "my-scheduler"
+  
+  scheduler:
+    queues:
+      - name: "fast"
+        index: 0
+        capacity: 1000
+      - name: "bulk"
+        index: 1
+        capacity: 5000
+  
+  priority-tree:
+    - name: "HIGH_PRIORITY"
+      condition:
+        type: EQUALS
+        field: $req.priority
+        value: "HIGH"
+      queue: "fast"
+    
+    - name: "DEFAULT"
+      condition:
+        type: ALWAYS_TRUE
+      queue: "bulk"
+```
+
 | Property | Default | Description |
 |----------|---------|-------------|
-| `queue-capacity` | 1000 | Scheduler queue capacity |
+| `queue-capacity` | 1000 | Capacity for single default queue |
+| `queues[].name` | required | Queue name |
+| `queues[].index` | auto | Priority index (lower = higher priority) |
+| `queues[].capacity` | 1000 | Maximum queue capacity |
 
-### Executor Settings (Adapter)
-
-Path: `pool.adapters.executor`
-
-| Property | Default | Description |
-|----------|---------|-------------|
-| `core-pool-size` | 10 | Minimum number of threads |
-| `max-pool-size` | 50 | Maximum number of threads |
-| `queue-capacity` | 1000 | Task queue capacity |
-| `keep-alive-seconds` | 60 | Idle thread timeout |
-| `thread-name-prefix` | "pool-" | Thread naming prefix |
-| `allow-core-thread-timeout` | true | Allow core threads to time out when idle |
+> **Note:** If `adapters.executors` is configured, those queues take precedence over `scheduler.queues`.
 
 ### Priority Strategy
 
-Pool currently supports `FIFO` only. Other types (`TIME_BASED`, `BUCKET_BASED`) are reserved for future implementations and will raise a configuration error if selected.
+Pool currently supports `FIFO` only. Other types (`TIME_BASED`, `BUCKET_BASED`) are reserved for future implementations.
 
 ### Priority Tree
 
-The priority tree is evaluated top-to-bottom. First matching node wins. Always include a catch-all `ALWAYS_TRUE` at the end.
+The priority tree is evaluated top-to-bottom. First matching node wins. Leaf nodes specify the target `queue` for routing.
 
 ```yaml
 priority-tree:
@@ -254,6 +364,107 @@ priority-tree:
         sort-by:
           field: $req.priority
           direction: DESC
+        queue: "fast"         # Route matching tasks to "fast" queue
+```
+
+---
+
+## Multi-Queue Architecture
+
+Pool supports **multiple queues**, each with its own worker pool. This enables:
+
+- **Workload Isolation** - High-priority tasks get dedicated workers
+- **Resource Control** - Different thread pool sizes per queue
+- **Queue-Based Routing** - Policy tree routes tasks to specific queues
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           Task Submission                               │
+│                                                                         │
+│   submit(context, task)                                                 │
+│         │                                                               │
+│         ▼                                                               │
+│   ┌─────────────────┐                                                   │
+│   │  Policy Engine  │  Evaluates priority tree                          │
+│   │                 │  Determines: priority key + target queue          │
+│   └────────┬────────┘                                                   │
+│            │                                                            │
+│            │  returns queue name                                        │
+│            ▼                                                            │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │                   Priority Scheduler                             │   │
+│   │   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │   │
+│   │   │ Queue: fast  │    │ Queue: bulk  │    │ Queue: ...   │      │   │
+│   │   │ index: 0     │    │ index: 1     │    │ index: N     │      │   │
+│   │   │ capacity:1000│    │ capacity:500 │    │              │      │   │
+│   │   └──────┬───────┘    └──────┬───────┘    └──────┬───────┘      │   │
+│   └──────────│───────────────────│───────────────────│──────────────┘   │
+│              │                   │                   │                  │
+│              ▼                   ▼                   ▼                  │
+│   ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐       │
+│   │ Workers (fast)   │ │ Workers (bulk)   │ │ Workers (...)    │       │
+│   │ core: 10         │ │ core: 5          │ │                  │       │
+│   │ max: 50          │ │ max: 20          │ │                  │       │
+│   │                  │ │                  │ │                  │       │
+│   │ getNext("fast")  │ │ getNext("bulk")  │ │                  │       │
+│   └──────────────────┘ └──────────────────┘ └──────────────────┘       │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Concepts
+
+1. **Queue Routing**: Leaf nodes in the priority tree specify a `queue` field. Tasks matching that path are routed to that queue.
+
+2. **Per-Queue Workers**: Each queue has its own worker pool with independent `core-pool-size` and `max-pool-size`.
+
+3. **Queue Priority**: Queues have an `index` field. When calling `getNext()` without a queue name, queues are checked in index order (lowest first).
+
+4. **Bounded Queues**: Each queue has a `capacity`. When full, submissions are rejected with `TaskRejectedException`.
+
+### Example: Fast vs Bulk Processing
+
+```yaml
+adapters:
+  executors:
+    # Fast queue: High priority, more workers, quick turnaround
+    - core-pool-size: 10
+      max-pool-size: 50
+      keep-alive-seconds: 60
+      queue:
+        name: "fast"
+        index: 0
+        capacity: 1000
+
+    # Bulk queue: Lower priority, fewer workers, batch processing
+    - core-pool-size: 5
+      max-pool-size: 20
+      keep-alive-seconds: 120
+      queue:
+        name: "bulk"
+        index: 1
+        capacity: 500
+
+priority-tree:
+  - name: "PLATINUM_CUSTOMERS"
+    condition:
+      type: EQUALS
+      field: $req.tier
+      value: "PLATINUM"
+    queue: "fast"           # VIPs go to fast queue
+
+  - name: "HIGH_VALUE"
+    condition:
+      type: GREATER_THAN
+      field: $req.amount
+      value: 50000
+    queue: "fast"           # High-value goes to fast queue
+
+  - name: "DEFAULT"
+    condition:
+      type: ALWAYS_TRUE
+    queue: "bulk"           # Everything else goes to bulk queue
 ```
 
 ---
@@ -303,28 +514,29 @@ priority-tree:
             sort-by:
               field: $req.priority
               direction: DESC
+            queue: "fast"
 ```
 
 **Example**: A task with `{region: "NORTH_AMERICA", customerTier: "PLATINUM", amount: 500000}` would match:
 ```
-Path: L1.NORTH_AMERICA → L2.PLATINUM → L3.HIGH_VALUE
+Path: L1.NORTH_AMERICA → L2.PLATINUM → L3.HIGH_VALUE → Queue: fast
 ```
 
 ### The Path Vector
 
 Each matched path is converted to a **Path Vector** - an array of indices representing which branch was taken at each level:
 
-| Task | Matched Path | Path Vector |
-|------|--------------|-------------|
-| NA + Platinum + High Value | L1.NORTH_AMERICA → L2.PLATINUM → L3.HIGH_VALUE | `[1, 1, 1]` |
-| NA + Platinum + Default | L1.NORTH_AMERICA → L2.PLATINUM → L3.DEFAULT | `[1, 1, 2]` |
-| NA + Gold + Default | L1.NORTH_AMERICA → L2.GOLD → L3.DEFAULT | `[1, 2, 1]` |
-| Europe + Default + Default | L1.EUROPE → L2.DEFAULT → L3.DEFAULT | `[2, 1, 1]` |
-| Asia + Default + Default | L1.DEFAULT → L2.DEFAULT → L3.DEFAULT | `[3, 1, 1]` |
+| Task | Matched Path | Path Vector | Queue |
+|------|--------------|-------------|-------|
+| NA + Platinum + High Value | L1.NORTH_AMERICA → L2.PLATINUM → L3.HIGH_VALUE | `[1, 1, 1]` | fast |
+| NA + Platinum + Default | L1.NORTH_AMERICA → L2.PLATINUM → L3.DEFAULT | `[1, 1, 2]` | fast |
+| NA + Gold + Default | L1.NORTH_AMERICA → L2.GOLD → L3.DEFAULT | `[1, 2, 1]` | fast |
+| Europe + Default + Default | L1.EUROPE → L2.DEFAULT → L3.DEFAULT | `[2, 1, 1]` | fast |
+| Asia + Default + Default | L1.DEFAULT → L2.DEFAULT → L3.DEFAULT | `[3, 1, 1]` | bulk |
 
 ### Vector Comparison (Lexicographic)
 
-Tasks are ordered by comparing their path vectors **lexicographically** (like dictionary sorting):
+Within a queue, tasks are ordered by comparing their path vectors **lexicographically** (like dictionary sorting):
 
 ```
 [1, 1, 1] < [1, 1, 2] < [1, 2, 1] < [2, 1, 1] < [3, 1, 1]
@@ -339,13 +551,6 @@ Priority   Priority    Priority    Priority    Priority
 3. Continue until a difference is found
 4. **Lower values = Higher priority**
 
-**Example Comparisons:**
-```
-[1, 1, 1] vs [1, 2, 1]  → [1, 1, 1] wins (1 < 2 at position 2)
-[1, 2, 1] vs [2, 1, 1]  → [1, 2, 1] wins (1 < 2 at position 1)
-[2, 1, 1] vs [2, 1, 2]  → [2, 1, 1] wins (1 < 2 at position 3)
-```
-
 ### Within-Bucket Ordering (sort-by)
 
 When multiple tasks have the **same path vector** (same bucket), they're ordered by the `sort-by` field defined at the leaf node:
@@ -359,66 +564,19 @@ When multiple tasks have the **same path vector** (same bucket), they're ordered
   sort-by:
     field: $req.priority    # Sort by this field within this bucket
     direction: DESC         # Higher priority values first
+  queue: "fast"
 ```
-
-**Example**: Three tasks all match `[1, 1, 1]`:
-| Task | priority | Order |
-|------|----------|-------|
-| Task A | 95 | 1st (highest priority) |
-| Task B | 80 | 2nd |
-| Task C | 50 | 3rd |
 
 ### Complete Priority Calculation
 
 The final priority is determined by:
 
-1. **Primary**: Path Vector (which bucket)
-2. **Secondary**: Sort-by value (within bucket)
+1. **Primary**: Queue routing (which queue)
+2. **Secondary**: Path Vector (which bucket within queue)
+3. **Tertiary**: Sort-by value (within bucket)
 
 ```
-Final Order = PathVector comparison → then → SortBy comparison
-```
-
-### Visual Example
-
-Given this tree:
-```yaml
-priority-tree:
-  - name: "PLATINUM"       # Index 1
-    condition: { type: EQUALS, field: $req.tier, value: "PLATINUM" }
-    sort-by: { field: $req.priority, direction: DESC }
-    
-  - name: "GOLD"           # Index 2
-    condition: { type: EQUALS, field: $req.tier, value: "GOLD" }
-    sort-by: { field: $sys.submittedAt, direction: ASC }
-    
-  - name: "DEFAULT"        # Index 3
-    condition: { type: ALWAYS_TRUE }
-    sort-by: { field: $sys.submittedAt, direction: ASC }
-```
-
-And these tasks submitted:
-| Task | tier | priority | submittedAt | Path Vector | Bucket Order |
-|------|------|----------|-------------|-------------|--------------|
-| T1 | PLATINUM | 90 | 1000 | `[1]` | 2nd in bucket |
-| T2 | PLATINUM | 95 | 1001 | `[1]` | 1st in bucket |
-| T3 | GOLD | - | 999 | `[2]` | 1st in bucket |
-| T4 | GOLD | - | 1002 | `[2]` | 2nd in bucket |
-| T5 | SILVER | - | 998 | `[3]` | 1st in bucket |
-
-**Execution Order**: T2 → T1 → T3 → T4 → T5
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Bucket [1] PLATINUM     │  Bucket [2] GOLD  │ Bucket [3]   │
-│  (sorted by priority↓)   │  (sorted by time↑)│ DEFAULT      │
-│  ┌─────┐ ┌─────┐         │  ┌─────┐ ┌─────┐  │ ┌─────┐      │
-│  │ T2  │ │ T1  │         │  │ T3  │ │ T4  │  │ │ T5  │      │
-│  │p=95 │ │p=90 │         │  │t=999│ │t=1002│ │ │t=998│      │
-│  └─────┘ └─────┘         │  └─────┘ └─────┘  │ └─────┘      │
-│     ↓       ↓            │     ↓       ↓     │    ↓         │
-└─────────────────────────────────────────────────────────────┘
-        1st     2nd              3rd     4th        5th
+Task → Policy Evaluation → Queue + PathVector + SortValue
 ```
 
 ### Design Tips
@@ -426,7 +584,8 @@ And these tasks submitted:
 1. **Put highest priority conditions first** - They get lower indices (higher priority)
 2. **Always end with ALWAYS_TRUE** - Catch-all for unmatched tasks
 3. **Use nested-levels for multi-dimensional priority** - Region → Tier → Amount
-4. **Choose sort-by wisely**:
+4. **Specify queue at leaf nodes** - Route tasks to appropriate worker pools
+5. **Choose sort-by wisely**:
    - `$req.priority DESC` - User-provided priority
    - `$sys.submittedAt ASC` - FIFO within bucket
    - `$req.amount DESC` - Highest value first
@@ -442,54 +601,42 @@ This design makes the prioritization engine reusable beyond the in-memory execut
 **1) Priority Engine (pure, no scheduling/execution)**  
 Evaluates policy and produces `EvaluationResult` / `PriorityKey`.
 
-**2) Priority Scheduler (local ordering only)**  
-Stores submitted items and orders by priority. No workers. Provides `submit()` and `getNext()`.
+**2) Priority Scheduler (multi-queue ordering)**  
+Stores submitted items across multiple queues and orders by priority. No workers. Provides `submit()` (returns queue name), `getNext()`, and `getNext(queueName)`.
 
 **3) Adapters (execution/transport)**  
 Consume from the priority scheduler and either execute locally or forward to external systems.
 
-### Package Organization Plan (Doc-Only)
+### Package Organization
 
-To make prioritization the primary identity, keep core logic in `com.pool.*` and move execution integrations under `com.pool.adapter.*`.
-
-**Proposed packages**
 - `com.pool.core` — core engine types and context (`TaskContext`, `TaskContextFactory`)
 - `com.pool.policy` — policy evaluation (`DefaultPolicyEngine`)
 - `com.pool.priority` — priority keys, vectors, calculators
 - `com.pool.scheduler` — priority scheduler API and default implementation
+- `com.pool.config` — configuration records (`PoolConfig`, `ExecutorSpec`, `QueueConfig`)
 - `com.pool.adapter.executor` — in-process thread pool executor
 - `com.pool.adapter.spring` — Spring Boot auto-configuration
 
-**Impact**
-- Thread-pool execution is clearly an adapter.
-- Priority scheduler becomes the main entry point in docs.
-- Integration-specific code is isolated from core prioritization.
-
-### Interface Sketch (conceptual)
+### Interface Sketch
 
 - `PriorityEngine`
   - `EvaluationResult evaluate(TaskContext ctx)`
   - `void updateConfig(PoolConfig cfg)` (optional)
 - `PriorityScheduler<T>`
-  - `boolean submit(TaskContext ctx, T payload)`
-  - `T getNext()`
+  - `String submit(TaskContext ctx, T payload)` — returns queue name
+  - `T getNext()` — from first non-empty queue
+  - `T getNext(String queueName)` — from specific queue
   - `Optional<T> getNext(long timeout, TimeUnit unit)`
-  - `int size()`, `int remainingCapacity()`
-- `PriorityAdapter<T>`
-  - `submit(...)` + adapter-specific handling (execute or forward)
+  - `Optional<T> getNext(String queueName, long timeout, TimeUnit unit)`
+  - `int size()`, `int size(String queueName)`
 
 ### Example Flows
 
 **A) In-memory execution (current behavior)**  
-`submit` → priority scheduler → worker threads execute.
+`submit` → priority scheduler → workers poll from their assigned queues
 
 **B) Kafka/External queue relay**  
 `submit` → priority scheduler → `getNext` → publish to Kafka/Redis/SQS, etc.
-
-### Notes
-
-- Priority is guaranteed within the local scheduler. External systems can preserve ordering by using a simple priority queue based on the provided `PriorityKey`.
-- Host services are responsible for config reload and calling `updateConfig()` or recreating the engine.
 
 ---
 
@@ -572,16 +719,34 @@ type: IS_NULL      # Field is null/missing
 pool:
   name: "order-pool"
 
-  scheduler:
-    queue-capacity: 1000
-
   adapters:
-    executor:
-      core-pool-size: 20
-      max-pool-size: 100
+    executors:
+      # Fast lane: VIP and high-value orders
+      - core-pool-size: 20
+        max-pool-size: 100
+        queue:
+          name: "fast"
+          index: 0
+          capacity: 1000
+
+      # Standard lane: Regular orders
+      - core-pool-size: 10
+        max-pool-size: 50
+        queue:
+          name: "standard"
+          index: 1
+          capacity: 2000
+
+      # Bulk lane: Low priority batch processing
+      - core-pool-size: 5
+        max-pool-size: 20
+        queue:
+          name: "bulk"
+          index: 2
+          capacity: 5000
     
   priority-tree:
-    # VIP customers with large orders
+    # VIP customers with large orders → fast
     - name: "VIP_LARGE"
       condition:
         type: AND
@@ -595,8 +760,9 @@ pool:
       sort-by:
         field: $req.order.total
         direction: DESC
+      queue: "fast"
 
-    # Express shipping
+    # Express shipping → fast
     - name: "EXPRESS"
       condition:
         type: EQUALS
@@ -605,14 +771,27 @@ pool:
       sort-by:
         field: $sys.submittedAt
         direction: ASC
+      queue: "fast"
 
-    # Standard orders by submission time
+    # Standard orders → standard
     - name: "STANDARD"
+      condition:
+        type: EQUALS
+        field: $req.shipping.type
+        value: "STANDARD"
+      sort-by:
+        field: $sys.submittedAt
+        direction: ASC
+      queue: "standard"
+
+    # Everything else → bulk
+    - name: "DEFAULT"
       condition:
         type: ALWAYS_TRUE
       sort-by:
         field: $sys.submittedAt
         direction: ASC
+      queue: "bulk"
 ```
 
 ## API Reference
@@ -654,19 +833,25 @@ TaskContext ctx = TaskContextFactory.create(jsonPayload, contextMap);
 TaskContext ctx = TaskContextFactory.create("task-123", jsonPayload, contextMap);
 ```
 
-### PriorityScheduler (External Integration)
+### PriorityScheduler (Multi-Queue)
 
 Use the in-memory priority scheduler to integrate with external systems (Kafka/Redis/etc.).
-It evaluates policy and delegates ordering to the configured `PriorityStrategy` (currently FIFO).
 
 ```java
 PoolConfig config = ConfigLoader.load("classpath:pool.yaml");
 PriorityScheduler<MyPayload> scheduler = new DefaultPriorityScheduler<>(config);
 
-scheduler.submit(ctx, payload);
+// Submit returns queue name
+String queueName = scheduler.submit(ctx, payload);
 
-// Pull highest priority payload
+// Pull from first non-empty queue
 MyPayload next = scheduler.getNext();
+
+// Pull from specific queue
+MyPayload fastTask = scheduler.getNext("fast");
+
+// Timed pull from specific queue
+Optional<MyPayload> task = scheduler.getNext("fast", 5, TimeUnit.SECONDS);
 ```
 
 #### Example: Relay to Kafka
@@ -676,15 +861,15 @@ PoolConfig config = ConfigLoader.load("classpath:pool.yaml");
 PriorityScheduler<OrderEvent> scheduler = new DefaultPriorityScheduler<>(config);
 
 // Submit events as they arrive
-scheduler.submit(ctx, orderEvent);
+String queue = scheduler.submit(ctx, orderEvent);
 
-// Relay loop (single-threaded example)
+// Relay loop per queue
 while (true) {
-    OrderEvent event = scheduler.getNext();
-
+    OrderEvent event = scheduler.getNext("fast");
+    
     ProducerRecord<String, OrderEvent> record = new ProducerRecord<>(
-            "orders",
-            "priority",
+            "orders-fast",
+            event.getOrderId(),
             event
     );
     kafkaProducer.send(record);

@@ -8,12 +8,14 @@ import java.util.stream.Collectors;
 /**
  * Represents a matched path through the priority tree from root to leaf.
  *
- * @param nodes  List of matched nodes from root to leaf
- * @param sortBy Sort-by configuration from the leaf node
+ * @param nodes     List of matched nodes from root to leaf
+ * @param sortBy    Sort-by configuration from the leaf node
+ * @param queueName Target queue name from the leaf node
  */
 public record MatchedPath(
         List<MatchedNode> nodes,
-        SortByConfig sortBy
+        SortByConfig sortBy,
+        String queueName
 ) {
     /**
      * Get the depth of the matched path.

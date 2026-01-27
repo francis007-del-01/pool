@@ -1,6 +1,6 @@
 package com.pool.adapter.executor;
 
-import com.pool.config.ExecutorConfig;
+import com.pool.config.ExecutorSpec;
 import com.pool.scheduler.PriorityScheduler;
 import org.slf4j.Logger;
 
@@ -11,13 +11,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /**
- * Worker thread that pulls tasks from the priority scheduler.
+ * Worker thread that pulls tasks from a specific queue in the priority scheduler.
  */
 final class WorkerThread extends Thread {
 
     private final int workerId;
     private final boolean isCoreThread;
-    private final ExecutorConfig execConfig;
+    private final String queueName;
+    private final ExecutorSpec execSpec;
     private final PriorityScheduler<ExecutableTask> priorityScheduler;
     private final AtomicBoolean shutdown;
     private final AtomicInteger activeCount;
@@ -28,7 +29,8 @@ final class WorkerThread extends Thread {
     WorkerThread(
             int workerId,
             boolean isCoreThread,
-            ExecutorConfig execConfig,
+            String queueName,
+            ExecutorSpec execSpec,
             PriorityScheduler<ExecutableTask> priorityScheduler,
             AtomicBoolean shutdown,
             AtomicInteger activeCount,
@@ -36,10 +38,11 @@ final class WorkerThread extends Thread {
             Consumer<WorkerThread> onRemove,
             Logger log
     ) {
-        super(execConfig.threadNamePrefix() + workerId);
+        super(execSpec.threadNamePrefix() + workerId);
         this.workerId = workerId;
         this.isCoreThread = isCoreThread;
-        this.execConfig = execConfig;
+        this.queueName = queueName;
+        this.execSpec = execSpec;
         this.priorityScheduler = priorityScheduler;
         this.shutdown = shutdown;
         this.activeCount = activeCount;
@@ -49,27 +52,31 @@ final class WorkerThread extends Thread {
         setDaemon(false);
     }
 
+    public String getQueueName() {
+        return queueName;
+    }
+
     @Override
     public void run() {
-        log.debug("Worker {} started (core={})", workerId, isCoreThread);
+        log.debug("Worker {} started for queue '{}' (core={})", workerId, queueName, isCoreThread);
 
         while (!shutdown.get()) {
             try {
                 ExecutableTask task;
 
-                boolean allowCoreTimeout = execConfig.allowCoreThreadTimeout();
+                boolean allowCoreTimeout = execSpec.allowCoreThreadTimeout();
                 if (isCoreThread && !allowCoreTimeout) {
-                    // Core threads block indefinitely
-                    task = priorityScheduler.getNext();
+                    // Core threads block indefinitely on their queue
+                    task = priorityScheduler.getNext(queueName);
                 } else {
                     // Timed poll - exit if idle too long
                     Optional<ExecutableTask> optionalTask = priorityScheduler.getNext(
-                            execConfig.keepAliveSeconds(), TimeUnit.SECONDS);
+                            queueName, execSpec.keepAliveSeconds(), TimeUnit.SECONDS);
 
                     if (optionalTask.isEmpty()) {
                         // Timeout - no work available, scale down
-                        log.debug("Worker {} idle for {}s, scaling down",
-                                workerId, execConfig.keepAliveSeconds());
+                        log.debug("Worker {} idle for {}s on queue '{}', scaling down",
+                                workerId, execSpec.keepAliveSeconds(), queueName);
                         break;
                     }
                     task = optionalTask.get();
@@ -78,7 +85,8 @@ final class WorkerThread extends Thread {
                 activeCount.incrementAndGet();
                 try {
                     long startTime = System.currentTimeMillis();
-                    log.debug("Worker {} executing task {}", workerId, task.getTaskId());
+                    log.debug("Worker {} executing task {} from queue '{}'", 
+                            workerId, task.getTaskId(), queueName);
 
                     // Execute the task
                     task.run();

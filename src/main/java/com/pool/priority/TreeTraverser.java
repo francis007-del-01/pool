@@ -47,17 +47,21 @@ public class TreeTraverser {
         }
 
         List<MatchedNode> path = new ArrayList<>();
-        SortByConfig leafSortBy = traverseRecursive(nodes, context, path, 0);
+        LeafResult leafResult = traverseRecursive(nodes, context, path, 0);
         
-        if (leafSortBy != null) {
-            MatchedPath matchedPath = new MatchedPath(path, leafSortBy);
-            log.debug("Matched path: {} for task {}", matchedPath.toPathString(), context.getTaskId());
+        if (leafResult != null) {
+            MatchedPath matchedPath = new MatchedPath(path, leafResult.sortBy, leafResult.queueName);
+            log.debug("Matched path: {} -> queue: {} for task {}", 
+                    matchedPath.toPathString(), leafResult.queueName, context.getTaskId());
             return Optional.of(matchedPath);
         }
 
         log.debug("No matching path found for task {}", context.getTaskId());
         return Optional.empty();
     }
+
+    /** Internal result containing both sortBy and queue name from leaf node. */
+    private record LeafResult(SortByConfig sortBy, String queueName) {}
 
     /**
      * Recursive traversal of the tree.
@@ -66,12 +70,12 @@ public class TreeTraverser {
      * @param context Task context
      * @param path    Accumulated path (mutated)
      * @param level   Current level (0-based)
-     * @return SortByConfig if a leaf is matched, null otherwise
+     * @return LeafResult if a leaf is matched, null otherwise
      */
     private static final int MAX_DEPTH = 9;
 
-    private SortByConfig traverseRecursive(List<PriorityNodeConfig> nodes, TaskContext context,
-                                            List<MatchedNode> path, int level) {
+    private LeafResult traverseRecursive(List<PriorityNodeConfig> nodes, TaskContext context,
+                                         List<MatchedNode> path, int level) {
         if (nodes == null || nodes.isEmpty()) {
             return null;
         }
@@ -101,11 +105,11 @@ public class TreeTraverser {
             if (node.isLeaf()) {
                 // Leaf node - we have a complete match
                 path.add(new MatchedNode(node.name(), branchIndex));
-                return node.getEffectiveSortBy();
+                return new LeafResult(node.getEffectiveSortBy(), node.queue());
             }
 
             // Non-leaf node - try to match children
-            SortByConfig childResult = traverseRecursive(
+            LeafResult childResult = traverseRecursive(
                     node.nestedLevels(), context, path, level + 1);
 
             if (childResult != null) {

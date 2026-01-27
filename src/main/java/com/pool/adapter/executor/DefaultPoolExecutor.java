@@ -1,6 +1,6 @@
 package com.pool.adapter.executor;
 
-import com.pool.config.ExecutorConfig;
+import com.pool.config.ExecutorSpec;
 import com.pool.config.PoolConfig;
 import com.pool.core.TaskContext;
 import com.pool.exception.TaskRejectedException;
@@ -8,13 +8,13 @@ import com.pool.policy.DefaultPolicyEngine;
 import com.pool.policy.PolicyEngine;
 import com.pool.scheduler.DefaultPriorityScheduler;
 import com.pool.scheduler.PriorityScheduler;
-import com.pool.strategy.PriorityStrategy;
-import com.pool.strategy.PriorityStrategyFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Default implementation of PoolExecutor.
- * Uses a pluggable PriorityStrategy for task ordering and selection.
+ * Supports multiple queues, each with its own worker pool based on ExecutorSpec.
  */
 public class DefaultPoolExecutor implements PoolExecutor {
 
@@ -32,72 +32,87 @@ public class DefaultPoolExecutor implements PoolExecutor {
 
     private final PoolConfig config;
     private final PolicyEngine policyEngine;
-    private final PriorityStrategy priorityStrategy;
     private final PriorityScheduler<ExecutableTask> priorityScheduler;
-    private final List<WorkerThread> workers;
+    
+    // Per-queue worker management
+    private final Map<String, List<WorkerThread>> workersByQueue;
+    private final Map<String, AtomicInteger> workerCountByQueue;
+    private final Map<String, AtomicInteger> activeCountByQueue;
+    private final Map<String, AtomicInteger> completedCountByQueue;
+    
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
     private final AtomicInteger submittedCount = new AtomicInteger(0);
-    private final AtomicInteger completedCount = new AtomicInteger(0);
     private final AtomicInteger rejectedCount = new AtomicInteger(0);
-    private final AtomicInteger activeCount = new AtomicInteger(0);
-    private final AtomicInteger workerCount = new AtomicInteger(0);
-    private final ExecutorConfig execConfig;
 
     public DefaultPoolExecutor(PoolConfig config) {
         this.config = config;
         this.policyEngine = new DefaultPolicyEngine(config);
-
-        this.execConfig = config.executor() != null
-                ? config.executor()
-                : ExecutorConfig.defaults();
-
-        // Create priority strategy
-        this.priorityStrategy = PriorityStrategyFactory.create(
-                config.priorityStrategy(),
-                execConfig.queueCapacity()
-        );
-        this.priorityScheduler = new DefaultPriorityScheduler<>(policyEngine, priorityStrategy);
-
-        // Create worker threads
-        this.workers = new ArrayList<>();
-
-        // Start core worker threads
-        for (int i = 0; i < execConfig.corePoolSize(); i++) {
-            startWorker(i + 1, true);
+        this.priorityScheduler = new DefaultPriorityScheduler<>(config, policyEngine);
+        
+        // Initialize per-queue structures
+        this.workersByQueue = new HashMap<>();
+        this.workerCountByQueue = new HashMap<>();
+        this.activeCountByQueue = new HashMap<>();
+        this.completedCountByQueue = new HashMap<>();
+        
+        // Create workers for each executor spec
+        for (ExecutorSpec spec : config.executors()) {
+            String queueName = spec.queue().name();
+            
+            workersByQueue.put(queueName, new ArrayList<>());
+            workerCountByQueue.put(queueName, new AtomicInteger(0));
+            activeCountByQueue.put(queueName, new AtomicInteger(0));
+            completedCountByQueue.put(queueName, new AtomicInteger(0));
+            
+            // Start core workers for this queue
+            for (int i = 0; i < spec.corePoolSize(); i++) {
+                startWorker(queueName, spec, i + 1, true);
+            }
+            
+            log.info("Initialized executor for queue '{}' (core={}, max={}, capacity={})",
+                    queueName, spec.corePoolSize(), spec.maxPoolSize(), spec.queue().capacity());
         }
-
-        log.info("PoolExecutor initialized: {} (strategy={}, core={}, max={}, queueCapacity={})",
-                config.name(), priorityStrategy.getName(),
-                execConfig.corePoolSize(), execConfig.maxPoolSize(),
-                execConfig.queueCapacity());
+        
+        log.info("PoolExecutor initialized: {} with {} queues", config.name(), config.executors().size());
     }
 
-    private void startWorker(int workerId, boolean isCoreThread) {
+    private void startWorker(String queueName, ExecutorSpec spec, int workerId, boolean isCoreThread) {
         WorkerThread worker = new WorkerThread(
                 workerId,
                 isCoreThread,
-                execConfig,
+                queueName,
+                spec,
                 priorityScheduler,
                 shutdown,
-                activeCount,
-                completedCount,
+                activeCountByQueue.get(queueName),
+                completedCountByQueue.get(queueName),
                 this::removeWorker,
                 log
         );
-        synchronized (workers) {
-            workers.add(worker);
+        
+        synchronized (workersByQueue) {
+            workersByQueue.get(queueName).add(worker);
         }
-        workerCount.incrementAndGet();
+        workerCountByQueue.get(queueName).incrementAndGet();
         worker.start();
-        log.debug("Started {} worker thread: {}", isCoreThread ? "core" : "excess", worker.getName());
+        
+        log.debug("Started {} worker {} for queue '{}'", 
+                isCoreThread ? "core" : "excess", worker.getName(), queueName);
     }
 
     private void removeWorker(WorkerThread worker) {
-        synchronized (workers) {
-            workers.remove(worker);
+        String queueName = worker.getQueueName();
+        synchronized (workersByQueue) {
+            List<WorkerThread> workers = workersByQueue.get(queueName);
+            if (workers != null) {
+                workers.remove(worker);
+            }
         }
-        workerCount.decrementAndGet();
-        log.debug("Removed worker thread: {}", worker.getName());
+        AtomicInteger count = workerCountByQueue.get(queueName);
+        if (count != null) {
+            count.decrementAndGet();
+        }
+        log.debug("Removed worker {} from queue '{}'", worker.getName(), queueName);
     }
 
     @Override
@@ -115,17 +130,18 @@ public class DefaultPoolExecutor implements PoolExecutor {
         FutureTask<Void> futureTask = new FutureTask<>(task, null);
         ExecutableTask executableTask = new ExecutableTask(futureTask, context.getTaskId());
 
-        if (!priorityScheduler.submit(context, executableTask)) {
+        String queueName = priorityScheduler.submit(context, executableTask);
+        if (queueName == null) {
             rejectedCount.incrementAndGet();
             throw new TaskRejectedException("Queue is full, task rejected: " + context.getTaskId());
         }
 
         submittedCount.incrementAndGet();
-        log.debug("Task {} submitted (queue size: {})",
-                context.getTaskId(), priorityScheduler.size());
+        log.debug("Task {} submitted to queue '{}' (queue size: {})",
+                context.getTaskId(), queueName, priorityScheduler.size(queueName));
 
-        // Scale up workers if needed
-        maybeScaleUp();
+        // Scale up workers for this queue if needed
+        maybeScaleUp(queueName);
     }
 
     @Override
@@ -143,33 +159,40 @@ public class DefaultPoolExecutor implements PoolExecutor {
         FutureTask<T> futureTask = new FutureTask<>(task);
         ExecutableTask executableTask = new ExecutableTask(futureTask, context.getTaskId());
 
-        if (!priorityScheduler.submit(context, executableTask)) {
+        String queueName = priorityScheduler.submit(context, executableTask);
+        if (queueName == null) {
             rejectedCount.incrementAndGet();
             throw new TaskRejectedException("Queue is full, task rejected: " + context.getTaskId());
         }
 
         submittedCount.incrementAndGet();
-        log.debug("Task {} submitted (queue size: {})",
-                context.getTaskId(), priorityScheduler.size());
+        log.debug("Task {} submitted to queue '{}' (queue size: {})",
+                context.getTaskId(), queueName, priorityScheduler.size(queueName));
 
-        // Scale up workers if needed
-        maybeScaleUp();
+        // Scale up workers for this queue if needed
+        maybeScaleUp(queueName);
 
         return futureTask;
     }
 
     /**
-     * Scale up workers if queue has items and we haven't hit max.
+     * Scale up workers for a specific queue if needed.
      */
-    private void maybeScaleUp() {
-        int currentWorkers = workerCount.get();
-        int queueSize = priorityScheduler.size();
+    private void maybeScaleUp(String queueName) {
+        ExecutorSpec spec = config.getExecutorByQueue(queueName);
+        if (spec == null) {
+            return;
+        }
+        
+        AtomicInteger workerCount = workerCountByQueue.get(queueName);
+        int currentWorkers = workerCount != null ? workerCount.get() : 0;
+        int queueSize = priorityScheduler.size(queueName);
 
-        // If queue has items and we have room for more workers
-        if (queueSize > 0 && currentWorkers < execConfig.maxPoolSize()) {
-            synchronized (workers) {
-                if (workerCount.get() < execConfig.maxPoolSize() && !shutdown.get()) {
-                    startWorker(workerCount.get() + 1, false);  // Excess threads can time out
+        if (queueSize > 0 && currentWorkers < spec.maxPoolSize()) {
+            synchronized (workersByQueue) {
+                int count = workerCountByQueue.get(queueName).get();
+                if (count < spec.maxPoolSize() && !shutdown.get()) {
+                    startWorker(queueName, spec, count + 1, false);
                 }
             }
         }
@@ -181,9 +204,11 @@ public class DefaultPoolExecutor implements PoolExecutor {
         shutdown.set(true);
         priorityScheduler.shutdown();
 
-        // Interrupt workers waiting on queue
-        for (WorkerThread worker : workers) {
-            worker.interrupt();
+        // Interrupt all workers
+        for (List<WorkerThread> workers : workersByQueue.values()) {
+            for (WorkerThread worker : workers) {
+                worker.interrupt();
+            }
         }
     }
 
@@ -194,8 +219,10 @@ public class DefaultPoolExecutor implements PoolExecutor {
         priorityScheduler.shutdown();
 
         // Interrupt all workers
-        for (WorkerThread worker : workers) {
-            worker.interrupt();
+        for (List<WorkerThread> workers : workersByQueue.values()) {
+            for (WorkerThread worker : workers) {
+                worker.interrupt();
+            }
         }
     }
 
@@ -207,14 +234,17 @@ public class DefaultPoolExecutor implements PoolExecutor {
     @Override
     public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
         long deadline = System.nanoTime() + unit.toNanos(timeout);
-        for (WorkerThread worker : workers) {
-            long remaining = deadline - System.nanoTime();
-            if (remaining <= 0) {
-                return false;
-            }
-            worker.join(TimeUnit.NANOSECONDS.toMillis(remaining));
-            if (worker.isAlive()) {
-                return false;
+        
+        for (List<WorkerThread> workers : workersByQueue.values()) {
+            for (WorkerThread worker : workers) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) {
+                    return false;
+                }
+                worker.join(TimeUnit.NANOSECONDS.toMillis(remaining));
+                if (worker.isAlive()) {
+                    return false;
+                }
             }
         }
         return true;
@@ -225,9 +255,11 @@ public class DefaultPoolExecutor implements PoolExecutor {
         if (!shutdown.get()) {
             return false;
         }
-        for (WorkerThread worker : workers) {
-            if (worker.isAlive()) {
-                return false;
+        for (List<WorkerThread> workers : workersByQueue.values()) {
+            for (WorkerThread worker : workers) {
+                if (worker.isAlive()) {
+                    return false;
+                }
             }
         }
         return true;
@@ -240,37 +272,64 @@ public class DefaultPoolExecutor implements PoolExecutor {
 
     @Override
     public int getActiveCount() {
-        return activeCount.get();
+        return activeCountByQueue.values().stream()
+                .mapToInt(AtomicInteger::get)
+                .sum();
     }
 
     /**
-     * Get the priority strategy being used.
+     * Get queue size for a specific queue.
      */
-    public PriorityStrategy getPriorityStrategy() {
-        return priorityStrategy;
+    public int getQueueSize(String queueName) {
+        return priorityScheduler.size(queueName);
+    }
+
+    /**
+     * Get active count for a specific queue.
+     */
+    public int getActiveCount(String queueName) {
+        AtomicInteger count = activeCountByQueue.get(queueName);
+        return count != null ? count.get() : 0;
+    }
+
+    /**
+     * Get worker count for a specific queue.
+     */
+    public int getWorkerCount(String queueName) {
+        AtomicInteger count = workerCountByQueue.get(queueName);
+        return count != null ? count.get() : 0;
+    }
+
+    /**
+     * Get total worker count across all queues.
+     */
+    public int getWorkerCount() {
+        return workerCountByQueue.values().stream()
+                .mapToInt(AtomicInteger::get)
+                .sum();
     }
 
     /**
      * Get statistics about the executor.
      */
     public ExecutorStats getStats() {
+        int totalCompleted = completedCountByQueue.values().stream()
+                .mapToInt(AtomicInteger::get)
+                .sum();
+        int totalMaxPool = config.executors().stream()
+                .mapToInt(ExecutorSpec::maxPoolSize)
+                .sum();
+        
         return new ExecutorStats(
                 submittedCount.get(),
-                completedCount.get(),
+                totalCompleted,
                 rejectedCount.get(),
-                priorityStrategy.getQueueSize(),
-                activeCount.get(),
-                workerCount.get(),
-                execConfig.maxPoolSize(),
-                priorityStrategy.getName()
+                priorityScheduler.size(),
+                getActiveCount(),
+                getWorkerCount(),
+                totalMaxPool,
+                "MULTI_QUEUE"
         );
-    }
-
-    /**
-     * Get current worker count.
-     */
-    public int getWorkerCount() {
-        return workerCount.get();
     }
 
     /**
@@ -278,6 +337,13 @@ public class DefaultPoolExecutor implements PoolExecutor {
      */
     public PolicyEngine getPolicyEngine() {
         return policyEngine;
+    }
+
+    /**
+     * Get the underlying priority scheduler.
+     */
+    public PriorityScheduler<ExecutableTask> getPriorityScheduler() {
+        return priorityScheduler;
     }
 
     /**
@@ -293,9 +359,4 @@ public class DefaultPoolExecutor implements PoolExecutor {
             int maxPoolSize,
             String strategyName
     ) {}
-
-    /**
-     * Worker thread that pulls tasks from the priority strategy.
-     * Core threads block indefinitely unless allow-core-thread-timeout is enabled.
-     */
 }

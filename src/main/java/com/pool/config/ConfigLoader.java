@@ -68,14 +68,13 @@ public class ConfigLoader {
         String name = getString(poolConfig, "name", "default-pool");
         String version = getString(poolConfig, "version", "1.0");
         
+        // Parse adapters.executors - each has executor config and queue
         Map<String, Object> adaptersConfig = (Map<String, Object>) poolConfig.get("adapters");
-        Map<String, Object> executorConfig = adaptersConfig != null
-                ? (Map<String, Object>) adaptersConfig.get("executor")
-                : (Map<String, Object>) poolConfig.get("executor"); // fallback
-        ExecutorConfig executor = parseExecutorConfig(executorConfig);
-
-        SchedulerConfig scheduler = parseSchedulerConfig(
-                (Map<String, Object>) poolConfig.get("scheduler"));
+        List<ExecutorSpec> executorSpecs = parseExecutorSpecs(adaptersConfig);
+        
+        // Parse scheduler config (for standalone scheduler without adapters)
+        Map<String, Object> schedulerMap = (Map<String, Object>) poolConfig.get("scheduler");
+        SchedulerConfig scheduler = parseSchedulerConfig(schedulerMap, executorSpecs);
         
         List<PriorityNodeConfig> priorityTree = parsePriorityTree(
                 (List<Map<String, Object>>) poolConfig.get("priority-tree"));
@@ -86,47 +85,120 @@ public class ConfigLoader {
         // Validate configuration
         if (priorityTree == null || priorityTree.isEmpty()) {
             log.warn("No priority-tree configured, using default catch-all");
+            String defaultQueue = scheduler.queues().isEmpty() ? "default" : scheduler.queues().get(0).name();
             priorityTree = List.of(new PriorityNodeConfig(
                     "DEFAULT",
                     ConditionConfig.alwaysTrue(),
                     null,
-                    SortByConfig.fifo()
+                    SortByConfig.fifo(),
+                    defaultQueue
             ));
         }
 
         PoolConfig config = new PoolConfig(
-                name, version, executor, scheduler, priorityTree, strategyConfig);
+                name, version, executorSpecs, scheduler, priorityTree, strategyConfig);
         
-        log.info("Loaded Pool configuration: {} v{} with {} root nodes, strategy: {}",
-                name, version, priorityTree.size(), 
+        log.info("Loaded Pool configuration: {} v{} with {} executors, {} queues, {} root nodes, strategy: {}",
+                name, version, executorSpecs.size(), scheduler.queues().size(), priorityTree.size(), 
                 strategyConfig != null ? strategyConfig.type() : "FIFO (default)");
         
         return config;
     }
 
-    private static ExecutorConfig parseExecutorConfig(Map<String, Object> map) {
-        if (map == null) {
-            return ExecutorConfig.defaults();
+    @SuppressWarnings("unchecked")
+    private static List<ExecutorSpec> parseExecutorSpecs(Map<String, Object> adaptersConfig) {
+        if (adaptersConfig == null) {
+            return List.of(ExecutorSpec.defaults("default", 0));
         }
-        ExecutorConfig defaults = ExecutorConfig.defaults();
-        return new ExecutorConfig(
-                getInt(map, "core-pool-size", defaults.corePoolSize()),
-                getInt(map, "max-pool-size", defaults.maxPoolSize()),
-                getInt(map, "queue-capacity", defaults.queueCapacity()),
-                getInt(map, "keep-alive-seconds", defaults.keepAliveSeconds()),
-                getString(map, "thread-name-prefix", defaults.threadNamePrefix()),
-                getBoolean(map, "allow-core-thread-timeout", defaults.allowCoreThreadTimeout())
-        );
+        
+        List<Map<String, Object>> executorsList = 
+                (List<Map<String, Object>>) adaptersConfig.get("executors");
+        if (executorsList == null || executorsList.isEmpty()) {
+            return List.of(ExecutorSpec.defaults("default", 0));
+        }
+        
+        List<ExecutorSpec> specs = new ArrayList<>();
+        for (int i = 0; i < executorsList.size(); i++) {
+            Map<String, Object> execMap = executorsList.get(i);
+            
+            // Parse queue config
+            Map<String, Object> queueMap = (Map<String, Object>) execMap.get("queue");
+            String queueName = queueMap != null 
+                    ? getString(queueMap, "name", "queue-" + i)
+                    : "queue-" + i;
+            int queueIndex = queueMap != null 
+                    ? getInt(queueMap, "index", i)
+                    : i;
+            int queueCapacity = queueMap != null 
+                    ? getInt(queueMap, "capacity", 1000)
+                    : 1000;
+            QueueConfig queue = new QueueConfig(queueName, queueIndex, queueCapacity);
+            
+            // Parse executor config
+            int corePoolSize = getInt(execMap, "core-pool-size", 10);
+            int maxPoolSize = getInt(execMap, "max-pool-size", 50);
+            int keepAliveSeconds = getInt(execMap, "keep-alive-seconds", 60);
+            String threadNamePrefix = getString(execMap, "thread-name-prefix", queueName + "-worker-");
+            boolean allowCoreThreadTimeout = getBoolean(execMap, "allow-core-thread-timeout", true);
+            
+            specs.add(new ExecutorSpec(
+                    queue,
+                    corePoolSize,
+                    maxPoolSize,
+                    keepAliveSeconds,
+                    threadNamePrefix,
+                    allowCoreThreadTimeout
+            ));
+            
+            log.debug("Parsed executor spec: queue={}, corePool={}, maxPool={}", 
+                    queueName, corePoolSize, maxPoolSize);
+        }
+        
+        return specs;
     }
 
-    private static SchedulerConfig parseSchedulerConfig(Map<String, Object> map) {
-        if (map == null) {
+    /**
+     * Parse scheduler config.
+     * Queues can come from:
+     * 1. adapters.executors (each executor has a queue) - for executor adapter use
+     * 2. scheduler.queues - for standalone scheduler use (no adapter)
+     * If both are present, executor queues take precedence.
+     */
+    @SuppressWarnings("unchecked")
+    private static SchedulerConfig parseSchedulerConfig(Map<String, Object> schedulerMap, 
+                                                        List<ExecutorSpec> executorSpecs) {
+        // If executors are configured, use their queues
+        if (executorSpecs != null && !executorSpecs.isEmpty() 
+                && !(executorSpecs.size() == 1 && executorSpecs.get(0).queue().name().equals("default"))) {
+            List<QueueConfig> queues = executorSpecs.stream()
+                    .map(ExecutorSpec::queue)
+                    .toList();
+            return new SchedulerConfig(queues);
+        }
+        
+        // Otherwise, parse from scheduler section
+        if (schedulerMap == null) {
             return SchedulerConfig.defaults();
         }
-        SchedulerConfig defaults = SchedulerConfig.defaults();
-        return new SchedulerConfig(
-                getInt(map, "queue-capacity", defaults.queueCapacity())
-        );
+        
+        // Check for queues list
+        List<Map<String, Object>> queuesList = (List<Map<String, Object>>) schedulerMap.get("queues");
+        if (queuesList != null && !queuesList.isEmpty()) {
+            List<QueueConfig> queues = new ArrayList<>();
+            for (int i = 0; i < queuesList.size(); i++) {
+                Map<String, Object> queueMap = queuesList.get(i);
+                String name = getString(queueMap, "name", "queue-" + i);
+                int index = getInt(queueMap, "index", i);
+                int capacity = getInt(queueMap, "capacity", 1000);
+                queues.add(new QueueConfig(name, index, capacity));
+                log.debug("Parsed scheduler queue: name={}, index={}, capacity={}", name, index, capacity);
+            }
+            return new SchedulerConfig(queues);
+        }
+        
+        // Fallback: single queue with queue-capacity
+        int queueCapacity = getInt(schedulerMap, "queue-capacity", 1000);
+        return new SchedulerConfig(List.of(new QueueConfig("default", 0, queueCapacity)));
     }
 
     @SuppressWarnings("unchecked")
@@ -153,8 +225,9 @@ public class ConfigLoader {
         }
         
         SortByConfig sortBy = parseSortBy((Map<String, Object>) map.get("sort-by"));
+        String queue = getString(map, "queue", null);
         
-        return new PriorityNodeConfig(name, condition, nestedLevels, sortBy);
+        return new PriorityNodeConfig(name, condition, nestedLevels, sortBy, queue);
     }
 
     @SuppressWarnings("unchecked")
