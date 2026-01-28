@@ -68,13 +68,13 @@ public class ConfigLoader {
         String name = getString(poolConfig, "name", "default-pool");
         String version = getString(poolConfig, "version", "1.0");
         
-        // Parse adapters.executors - each has executor config and queue
+        // Parse adapters.executors - each executor targets a named queue
         Map<String, Object> adaptersConfig = (Map<String, Object>) poolConfig.get("adapters");
         List<ExecutorSpec> executorSpecs = parseExecutorSpecs(adaptersConfig);
         
-        // Parse scheduler config (for standalone scheduler without adapters)
+        // Parse scheduler config (queues are defined here)
         Map<String, Object> schedulerMap = (Map<String, Object>) poolConfig.get("scheduler");
-        SchedulerConfig scheduler = parseSchedulerConfig(schedulerMap, executorSpecs);
+        SchedulerConfig scheduler = parseSchedulerConfig(schedulerMap);
         
         List<PriorityNodeConfig> priorityTree = parsePriorityTree(
                 (List<Map<String, Object>>) poolConfig.get("priority-tree"));
@@ -95,6 +95,18 @@ public class ConfigLoader {
             ));
         }
 
+        // Validate executor -> queue mapping
+        if (executorSpecs != null && !executorSpecs.isEmpty()) {
+            for (ExecutorSpec spec : executorSpecs) {
+                QueueConfig queue = scheduler.getQueue(spec.queueName());
+                if (queue == null) {
+                    throw new ConfigurationException(
+                            "Executor targets unknown queue '" + spec.queueName()
+                                    + "'. Define it under scheduler.queues.");
+                }
+            }
+        }
+
         PoolConfig config = new PoolConfig(
                 name, version, executorSpecs, scheduler, priorityTree, strategyConfig);
         
@@ -108,31 +120,33 @@ public class ConfigLoader {
     @SuppressWarnings("unchecked")
     private static List<ExecutorSpec> parseExecutorSpecs(Map<String, Object> adaptersConfig) {
         if (adaptersConfig == null) {
-            return List.of(ExecutorSpec.defaults("default", 0));
+            return List.of();
         }
         
         List<Map<String, Object>> executorsList = 
                 (List<Map<String, Object>>) adaptersConfig.get("executors");
         if (executorsList == null || executorsList.isEmpty()) {
-            return List.of(ExecutorSpec.defaults("default", 0));
+            return List.of();
         }
         
         List<ExecutorSpec> specs = new ArrayList<>();
         for (int i = 0; i < executorsList.size(); i++) {
             Map<String, Object> execMap = executorsList.get(i);
             
-            // Parse queue config
-            Map<String, Object> queueMap = (Map<String, Object>) execMap.get("queue");
-            String queueName = queueMap != null 
-                    ? getString(queueMap, "name", "queue-" + i)
-                    : "queue-" + i;
-            int queueIndex = queueMap != null 
-                    ? getInt(queueMap, "index", i)
-                    : i;
-            int queueCapacity = queueMap != null 
-                    ? getInt(queueMap, "capacity", 1000)
-                    : 1000;
-            QueueConfig queue = new QueueConfig(queueName, queueIndex, queueCapacity);
+            // Parse queue name (string preferred). If a map is provided, use its name.
+            Object queueObj = execMap.get("queue");
+            String queueName = null;
+            if (queueObj instanceof Map<?, ?> queueMap) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> queueMapTyped = (Map<String, Object>) queueMap;
+                queueName = getString(queueMapTyped, "name", null);
+                log.warn("Executor queue should be a name string. Found object for executor {}.", i);
+            } else if (queueObj != null) {
+                queueName = queueObj.toString();
+            }
+            if (queueName == null || queueName.isBlank()) {
+                queueName = getString(execMap, "queue-name", "queue-" + i);
+            }
             
             // Parse executor config
             int corePoolSize = getInt(execMap, "core-pool-size", 10);
@@ -142,7 +156,7 @@ public class ConfigLoader {
             boolean allowCoreThreadTimeout = getBoolean(execMap, "allow-core-thread-timeout", true);
             
             specs.add(new ExecutorSpec(
-                    queue,
+                    queueName,
                     corePoolSize,
                     maxPoolSize,
                     keepAliveSeconds,
@@ -150,7 +164,7 @@ public class ConfigLoader {
                     allowCoreThreadTimeout
             ));
             
-            log.debug("Parsed executor spec: queue={}, corePool={}, maxPool={}", 
+            log.debug("Parsed executor spec: queueName={}, corePool={}, maxPool={}",
                     queueName, corePoolSize, maxPoolSize);
         }
         
@@ -165,18 +179,7 @@ public class ConfigLoader {
      * If both are present, executor queues take precedence.
      */
     @SuppressWarnings("unchecked")
-    private static SchedulerConfig parseSchedulerConfig(Map<String, Object> schedulerMap, 
-                                                        List<ExecutorSpec> executorSpecs) {
-        // If executors are configured, use their queues
-        if (executorSpecs != null && !executorSpecs.isEmpty() 
-                && !(executorSpecs.size() == 1 && executorSpecs.get(0).queue().name().equals("default"))) {
-            List<QueueConfig> queues = executorSpecs.stream()
-                    .map(ExecutorSpec::queue)
-                    .toList();
-            return new SchedulerConfig(queues);
-        }
-        
-        // Otherwise, parse from scheduler section
+    private static SchedulerConfig parseSchedulerConfig(Map<String, Object> schedulerMap) {
         if (schedulerMap == null) {
             return SchedulerConfig.defaults();
         }

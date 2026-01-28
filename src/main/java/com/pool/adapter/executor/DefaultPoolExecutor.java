@@ -2,6 +2,7 @@ package com.pool.adapter.executor;
 
 import com.pool.config.ExecutorSpec;
 import com.pool.config.PoolConfig;
+import com.pool.config.QueueConfig;
 import com.pool.core.TaskContext;
 import com.pool.exception.TaskRejectedException;
 import com.pool.policy.DefaultPolicyEngine;
@@ -55,9 +56,21 @@ public class DefaultPoolExecutor implements PoolExecutor {
         this.activeCountByQueue = new HashMap<>();
         this.completedCountByQueue = new HashMap<>();
         
+        if (config.scheduler() == null || config.scheduler().queues().isEmpty()) {
+            throw new IllegalArgumentException("No queues configured under scheduler.queues");
+        }
+        if (config.executors() == null || config.executors().isEmpty()) {
+            throw new IllegalArgumentException("No executors configured under adapters.executors");
+        }
+
         // Create workers for each executor spec
         for (ExecutorSpec spec : config.executors()) {
-            String queueName = spec.queue().name();
+            String queueName = spec.queueName();
+            QueueConfig queueConfig = config.scheduler().getQueue(queueName);
+            if (queueConfig == null) {
+                throw new IllegalArgumentException(
+                        "Executor targets unknown queue '" + queueName + "'. Define it under scheduler.queues.");
+            }
             
             workersByQueue.put(queueName, new ArrayList<>());
             workerCountByQueue.put(queueName, new AtomicInteger(0));
@@ -70,7 +83,7 @@ public class DefaultPoolExecutor implements PoolExecutor {
             }
             
             log.info("Initialized executor for queue '{}' (core={}, max={}, capacity={})",
-                    queueName, spec.corePoolSize(), spec.maxPoolSize(), spec.queue().capacity());
+                    queueName, spec.corePoolSize(), spec.maxPoolSize(), queueConfig.capacity());
         }
         
         log.info("PoolExecutor initialized: {} with {} queues", config.name(), config.executors().size());
@@ -135,6 +148,10 @@ public class DefaultPoolExecutor implements PoolExecutor {
             rejectedCount.incrementAndGet();
             throw new TaskRejectedException("Queue is full, task rejected: " + context.getTaskId());
         }
+        if (!workersByQueue.containsKey(queueName)) {
+            rejectedCount.incrementAndGet();
+            throw new TaskRejectedException("No executor configured for queue: " + queueName);
+        }
 
         submittedCount.incrementAndGet();
         log.debug("Task {} submitted to queue '{}' (queue size: {})",
@@ -163,6 +180,10 @@ public class DefaultPoolExecutor implements PoolExecutor {
         if (queueName == null) {
             rejectedCount.incrementAndGet();
             throw new TaskRejectedException("Queue is full, task rejected: " + context.getTaskId());
+        }
+        if (!workersByQueue.containsKey(queueName)) {
+            rejectedCount.incrementAndGet();
+            throw new TaskRejectedException("No executor configured for queue: " + queueName);
         }
 
         submittedCount.incrementAndGet();

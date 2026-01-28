@@ -45,7 +45,17 @@ pool:
   name: "order-processing-pool"
   version: "1.0"
 
-  # Multiple executors - each with its own queue and worker pool
+  # Queue definitions (shared by scheduler and executors)
+  scheduler:
+    queues:
+      - name: "fast"
+        index: 0          # Lower index = higher priority when polling
+        capacity: 1000
+      - name: "bulk"
+        index: 1
+        capacity: 500
+
+  # Multiple executors - each references a queue and defines its worker pool
   adapters:
     executors:
       - core-pool-size: 10
@@ -53,20 +63,14 @@ pool:
         keep-alive-seconds: 60
         thread-name-prefix: "fast-worker-"
         allow-core-thread-timeout: true
-        queue:
-          name: "fast"
-          index: 0          # Lower index = higher priority when polling
-          capacity: 1000
+        queue: "fast"
 
       - core-pool-size: 5
         max-pool-size: 20
         keep-alive-seconds: 120
         thread-name-prefix: "bulk-worker-"
         allow-core-thread-timeout: true
-        queue:
-          name: "bulk"
-          index: 1
-          capacity: 500
+        queue: "bulk"
 
   priority-strategy:
     type: FIFO
@@ -267,7 +271,7 @@ public class OrderService {
 
 Path: `pool.adapters.executors[]`
 
-Each executor defines a queue and its worker pool:
+Each executor references a queue by name and defines its worker pool:
 
 | Property | Default | Description |
 |----------|---------|-------------|
@@ -276,13 +280,11 @@ Each executor defines a queue and its worker pool:
 | `keep-alive-seconds` | 60 | Idle thread timeout before excess threads terminate |
 | `thread-name-prefix` | "queue-name-worker-" | Thread naming prefix |
 | `allow-core-thread-timeout` | true | Allow core threads to time out when idle |
-| `queue.name` | required | Queue name (referenced in priority tree leaf nodes) |
-| `queue.index` | required | Priority index (lower = higher priority when polling) |
-| `queue.capacity` | 1000 | Maximum queue capacity |
+| `queue` | required | Target queue name (must exist in `scheduler.queues`) |
 
-### Standalone Scheduler Configuration (No Adapter)
+### Queue Configuration (Scheduler)
 
-If you only need the `PriorityScheduler` without the executor adapter (e.g., for Kafka relay), configure queues directly under `scheduler`:
+Queues are defined under `scheduler` and used by both the scheduler and executor adapter:
 
 Path: `pool.scheduler`
 
@@ -337,8 +339,6 @@ pool:
 | `queues[].name` | required | Queue name |
 | `queues[].index` | auto | Priority index (lower = higher priority) |
 | `queues[].capacity` | 1000 | Maximum queue capacity |
-
-> **Note:** If `adapters.executors` is configured, those queues take precedence over `scheduler.queues`.
 
 ### Priority Strategy
 
@@ -426,25 +426,28 @@ Pool supports **multiple queues**, each with its own worker pool. This enables:
 ### Example: Fast vs Bulk Processing
 
 ```yaml
+scheduler:
+  queues:
+    - name: "fast"
+      index: 0
+      capacity: 1000
+    - name: "bulk"
+      index: 1
+      capacity: 500
+
 adapters:
   executors:
     # Fast queue: High priority, more workers, quick turnaround
     - core-pool-size: 10
       max-pool-size: 50
       keep-alive-seconds: 60
-      queue:
-        name: "fast"
-        index: 0
-        capacity: 1000
+      queue: "fast"
 
     # Bulk queue: Lower priority, fewer workers, batch processing
     - core-pool-size: 5
       max-pool-size: 20
       keep-alive-seconds: 120
-      queue:
-        name: "bulk"
-        index: 1
-        capacity: 500
+      queue: "bulk"
 
 priority-tree:
   - name: "PLATINUM_CUSTOMERS"
@@ -719,31 +722,34 @@ type: IS_NULL      # Field is null/missing
 pool:
   name: "order-pool"
 
+  scheduler:
+    queues:
+      - name: "fast"
+        index: 0
+        capacity: 1000
+      - name: "standard"
+        index: 1
+        capacity: 2000
+      - name: "bulk"
+        index: 2
+        capacity: 5000
+
   adapters:
     executors:
       # Fast lane: VIP and high-value orders
       - core-pool-size: 20
         max-pool-size: 100
-        queue:
-          name: "fast"
-          index: 0
-          capacity: 1000
+        queue: "fast"
 
       # Standard lane: Regular orders
       - core-pool-size: 10
         max-pool-size: 50
-        queue:
-          name: "standard"
-          index: 1
-          capacity: 2000
+        queue: "standard"
 
       # Bulk lane: Low priority batch processing
       - core-pool-size: 5
         max-pool-size: 20
-        queue:
-          name: "bulk"
-          index: 2
-          capacity: 5000
+        queue: "bulk"
     
   priority-tree:
     # VIP customers with large orders → fast
