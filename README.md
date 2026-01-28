@@ -394,7 +394,7 @@ Pool supports **multiple queues**, each with its own worker pool. This enables:
 │            │  returns queue name                                        │
 │            ▼                                                            │
 │   ┌─────────────────────────────────────────────────────────────────┐   │
-│   │                   Priority Scheduler                             │   │
+│   │                   Priority Scheduler                            │   │
 │   │   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │   │
 │   │   │ Queue: fast  │    │ Queue: bulk  │    │ Queue: ...   │      │   │
 │   │   │ index: 0     │    │ index: 1     │    │ index: N     │      │   │
@@ -403,13 +403,13 @@ Pool supports **multiple queues**, each with its own worker pool. This enables:
 │   └──────────│───────────────────│───────────────────│──────────────┘   │
 │              │                   │                   │                  │
 │              ▼                   ▼                   ▼                  │
-│   ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐       │
-│   │ Workers (fast)   │ │ Workers (bulk)   │ │ Workers (...)    │       │
-│   │ core: 10         │ │ core: 5          │ │                  │       │
-│   │ max: 50          │ │ max: 20          │ │                  │       │
-│   │                  │ │                  │ │                  │       │
-│   │ getNext("fast")  │ │ getNext("bulk")  │ │                  │       │
-│   └──────────────────┘ └──────────────────┘ └──────────────────┘       │
+│   ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐        │
+│   │ Workers (fast)   │ │ Workers (bulk)   │ │ Workers (...)    │        │
+│   │ core: 10         │ │ core: 5          │ │                  │        │
+│   │ max: 50          │ │ max: 20          │ │                  │        │
+│   │                  │ │                  │ │                  │        │
+│   │ getNext("fast")  │ │ getNext("bulk")  │ │                  │        │
+│   └──────────────────┘ └──────────────────┘ └──────────────────┘        │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
