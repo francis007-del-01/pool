@@ -4,7 +4,6 @@ import com.pool.config.ExecutorSpec;
 import com.pool.scheduler.PriorityScheduler;
 import org.slf4j.Logger;
 
-import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -16,7 +15,6 @@ import java.util.function.Consumer;
 final class WorkerThread extends Thread {
 
     private final int workerId;
-    private final boolean isCoreThread;
     private final String queueName;
     private final ExecutorSpec execSpec;
     private final PriorityScheduler<ExecutableTask> priorityScheduler;
@@ -28,7 +26,6 @@ final class WorkerThread extends Thread {
 
     WorkerThread(
             int workerId,
-            boolean isCoreThread,
             String queueName,
             ExecutorSpec execSpec,
             PriorityScheduler<ExecutableTask> priorityScheduler,
@@ -40,7 +37,6 @@ final class WorkerThread extends Thread {
     ) {
         super(execSpec.threadNamePrefix() + workerId);
         this.workerId = workerId;
-        this.isCoreThread = isCoreThread;
         this.queueName = queueName;
         this.execSpec = execSpec;
         this.priorityScheduler = priorityScheduler;
@@ -58,28 +54,24 @@ final class WorkerThread extends Thread {
 
     @Override
     public void run() {
-        log.debug("Worker {} started for queue '{}' (core={})", workerId, queueName, isCoreThread);
+        log.debug("Worker {} started for queue '{}'", workerId, queueName);
 
         while (!shutdown.get()) {
             try {
                 ExecutableTask task;
-
-                boolean allowCoreTimeout = execSpec.allowCoreThreadTimeout();
-                if (isCoreThread && !allowCoreTimeout) {
-                    // Core threads block indefinitely on their queue
-                    task = priorityScheduler.getNext(queueName);
-                } else {
+                if (execSpec.allowCoreThreadTimeout()) {
                     // Timed poll - exit if idle too long
-                    Optional<ExecutableTask> optionalTask = priorityScheduler.getNext(
+                    var optionalTask = priorityScheduler.getNext(
                             queueName, execSpec.keepAliveSeconds(), TimeUnit.SECONDS);
-
                     if (optionalTask.isEmpty()) {
-                        // Timeout - no work available, scale down
                         log.debug("Worker {} idle for {}s on queue '{}', scaling down",
                                 workerId, execSpec.keepAliveSeconds(), queueName);
                         break;
                     }
                     task = optionalTask.get();
+                } else {
+                    // Workers block indefinitely on their queue
+                    task = priorityScheduler.getNext(queueName);
                 }
 
                 activeCount.incrementAndGet();

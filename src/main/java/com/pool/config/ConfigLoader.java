@@ -135,39 +135,32 @@ public class ConfigLoader {
         for (int i = 0; i < executorsList.size(); i++) {
             Map<String, Object> execMap = executorsList.get(i);
             
-            // Parse queue name (string preferred). If a map is provided, use its name.
-            Object queueObj = execMap.get("queue");
-            String queueName = null;
-            if (queueObj instanceof Map<?, ?> queueMap) {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> queueMapTyped = (Map<String, Object>) queueMap;
-                queueName = getString(queueMapTyped, "name", null);
-                log.warn("Executor queue should be a name string. Found object for executor {}.", i);
-            } else if (queueObj != null) {
-                queueName = queueObj.toString();
+            // Parse queue name (queue_name preferred)
+            String queueName = getString(execMap, "queue_name", null);
+            if (queueName == null || queueName.isBlank()) {
+                queueName = getString(execMap, "queue-name", null);
             }
             if (queueName == null || queueName.isBlank()) {
-                queueName = getString(execMap, "queue-name", "queue-" + i);
+                Object queueObj = execMap.get("queue");
+                if (queueObj != null) {
+                    queueName = queueObj.toString();
+                }
             }
-            
-            // Parse executor config
-            int corePoolSize = getInt(execMap, "core-pool-size", 10);
-            int maxPoolSize = getInt(execMap, "max-pool-size", 50);
+            if (queueName == null || queueName.isBlank()) {
+                queueName = "queue-" + i;
+            }
+
+            int workerCount = getInt(execMap, "worker_count", 10);
+            if (workerCount <= 0) {
+                throw new ConfigurationException("Executor worker_count must be > 0 for queue: " + queueName);
+            }
             int keepAliveSeconds = getInt(execMap, "keep-alive-seconds", 60);
-            String threadNamePrefix = getString(execMap, "thread-name-prefix", queueName + "-worker-");
             boolean allowCoreThreadTimeout = getBoolean(execMap, "allow-core-thread-timeout", true);
-            
-            specs.add(new ExecutorSpec(
-                    queueName,
-                    corePoolSize,
-                    maxPoolSize,
-                    keepAliveSeconds,
-                    threadNamePrefix,
-                    allowCoreThreadTimeout
-            ));
-            
-            log.debug("Parsed executor spec: queueName={}, corePool={}, maxPool={}",
-                    queueName, corePoolSize, maxPoolSize);
+
+            specs.add(new ExecutorSpec(queueName, workerCount, keepAliveSeconds, allowCoreThreadTimeout));
+
+            log.debug("Parsed executor spec: queueName={}, workerCount={}, keepAlive={}, allowTimeout={}",
+                    queueName, workerCount, keepAliveSeconds, allowCoreThreadTimeout);
         }
         
         return specs;

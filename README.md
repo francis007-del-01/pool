@@ -58,19 +58,15 @@ pool:
   # Multiple executors - each references a queue and defines its worker pool
   adapters:
     executors:
-      - core-pool-size: 10
-        max-pool-size: 50
+      - queue_name: "fast"
+        worker_count: 10
         keep-alive-seconds: 60
-        thread-name-prefix: "fast-worker-"
         allow-core-thread-timeout: true
-        queue: "fast"
 
-      - core-pool-size: 5
-        max-pool-size: 20
+      - queue_name: "bulk"
+        worker_count: 5
         keep-alive-seconds: 120
-        thread-name-prefix: "bulk-worker-"
         allow-core-thread-timeout: true
-        queue: "bulk"
 
   priority-strategy:
     type: FIFO
@@ -295,12 +291,10 @@ Each executor references a queue by name and defines its worker pool:
 
 | Property | Default | Description |
 |----------|---------|-------------|
-| `core-pool-size` | 10 | Minimum number of worker threads for this queue |
-| `max-pool-size` | 50 | Maximum number of worker threads for this queue |
-| `keep-alive-seconds` | 60 | Idle thread timeout before excess threads terminate |
-| `thread-name-prefix` | "queue-name-worker-" | Thread naming prefix |
-| `allow-core-thread-timeout` | true | Allow core threads to time out when idle |
-| `queue` | required | Target queue name (must exist in `scheduler.queues`) |
+| `queue_name` | required | Target queue name (must exist in `scheduler.queues`) |
+| `worker_count` | 10 | Fixed number of worker threads for this queue |
+| `keep-alive-seconds` | 60 | Idle timeout before workers can terminate |
+| `allow-core-thread-timeout` | true | Allow workers to time out when idle |
 
 ### Queue Configuration (Scheduler)
 
@@ -308,23 +302,7 @@ Queues are defined under `scheduler` and used by both the scheduler and executor
 
 Path: `pool.scheduler`
 
-**Option 1: Single queue with capacity**
-
-```yaml
-pool:
-  name: "my-scheduler"
-  
-  scheduler:
-    queue-capacity: 1000    # Single "default" queue with this capacity
-  
-  priority-tree:
-    - name: "DEFAULT"
-      condition:
-        type: ALWAYS_TRUE
-      queue: "default"
-```
-
-**Option 2: Multiple named queues**
+**Example: Multiple named queues**
 
 ```yaml
 pool:
@@ -425,8 +403,8 @@ Pool supports **multiple queues**, each with its own worker pool. This enables:
 │              ▼                   ▼                   ▼                  │
 │   ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐        │
 │   │ Workers (fast)   │ │ Workers (bulk)   │ │ Workers (...)    │        │
-│   │ core: 10         │ │ core: 5          │ │                  │        │
-│   │ max: 50          │ │ max: 20          │ │                  │        │
+│   │ count: 10        │ │ count: 5         │ │                  │        │
+│   │                 │ │                  │ │                  │        │
 │   │                  │ │                  │ │                  │        │
 │   │ getNext("fast")  │ │ getNext("bulk")  │ │                  │        │
 │   └──────────────────┘ └──────────────────┘ └──────────────────┘        │
@@ -437,7 +415,7 @@ Pool supports **multiple queues**, each with its own worker pool. This enables:
 
 1. **Queue Routing**: Leaf nodes in the priority tree specify a `queue` field. Tasks matching that path are routed to that queue.
 
-2. **Per-Queue Workers**: Each queue has its own worker pool with independent `core-pool-size` and `max-pool-size`.
+2. **Per-Queue Workers**: Each queue has its own fixed `worker_count`.
 
 3. **Queue Priority**: Queues have an `index` field. When calling `getNext()` without a queue name, queues are checked in index order (lowest first).
 
@@ -458,16 +436,16 @@ scheduler:
 adapters:
   executors:
     # Fast queue: High priority, more workers, quick turnaround
-    - core-pool-size: 10
-      max-pool-size: 50
+    - queue_name: "fast"
+      worker_count: 10
       keep-alive-seconds: 60
-      queue: "fast"
+      allow-core-thread-timeout: true
 
     # Bulk queue: Lower priority, fewer workers, batch processing
-    - core-pool-size: 5
-      max-pool-size: 20
+    - queue_name: "bulk"
+      worker_count: 5
       keep-alive-seconds: 120
-      queue: "bulk"
+      allow-core-thread-timeout: true
 
 priority-tree:
   - name: "PLATINUM_CUSTOMERS"
@@ -905,19 +883,22 @@ pool:
   adapters:
     executors:
       # Fast lane: VIP and high-value orders
-      - core-pool-size: 20
-        max-pool-size: 100
-        queue: "fast"
+      - queue_name: "fast"
+        worker_count: 20
+        keep-alive-seconds: 60
+        allow-core-thread-timeout: true
 
       # Standard lane: Regular orders
-      - core-pool-size: 10
-        max-pool-size: 50
-        queue: "standard"
+      - queue_name: "standard"
+        worker_count: 10
+        keep-alive-seconds: 60
+        allow-core-thread-timeout: true
 
       # Bulk lane: Low priority batch processing
-      - core-pool-size: 5
-        max-pool-size: 20
-        queue: "bulk"
+      - queue_name: "bulk"
+        worker_count: 5
+        keep-alive-seconds: 120
+        allow-core-thread-timeout: true
     
   priority-tree:
     # VIP customers with large orders → fast

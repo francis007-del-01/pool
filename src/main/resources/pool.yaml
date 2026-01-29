@@ -16,19 +16,15 @@ pool:
   # Adapter configurations - executors reference queue names
   adapters:
     executors:
-      - core-pool-size: 10
-        max-pool-size: 50
+      - queue_name: "fast"
+        worker_count: 10
         keep-alive-seconds: 60
-        thread-name-prefix: "fast-worker-"
         allow-core-thread-timeout: true
-        queue: "fast"
 
-      - core-pool-size: 5
-        max-pool-size: 20
+      - queue_name: "bulk"
+        worker_count: 5
         keep-alive-seconds: 120
-        thread-name-prefix: "bulk-worker-"
         allow-core-thread-timeout: true
-        queue: "bulk"
 
   # Priority Strategy Configuration
   priority-strategy:
