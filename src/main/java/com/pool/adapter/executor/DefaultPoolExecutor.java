@@ -5,8 +5,8 @@ import com.pool.config.PoolConfig;
 import com.pool.config.QueueConfig;
 import com.pool.core.TaskContext;
 import com.pool.exception.TaskRejectedException;
-import com.pool.policy.DefaultPolicyEngine;
 import com.pool.policy.PolicyEngine;
+import com.pool.policy.PolicyEngineFactory;
 import com.pool.scheduler.DefaultPriorityScheduler;
 import com.pool.scheduler.PriorityScheduler;
 import org.slf4j.Logger;
@@ -47,7 +47,7 @@ public class DefaultPoolExecutor implements PoolExecutor {
 
     public DefaultPoolExecutor(PoolConfig config) {
         this.config = config;
-        this.policyEngine = new DefaultPolicyEngine(config);
+        this.policyEngine = PolicyEngineFactory.create(config);
         this.priorityScheduler = new DefaultPriorityScheduler<>(config, policyEngine);
         
         // Initialize per-queue structures
@@ -76,12 +76,12 @@ public class DefaultPoolExecutor implements PoolExecutor {
             workerCountByQueue.put(queueName, new AtomicInteger(0));
             activeCountByQueue.put(queueName, new AtomicInteger(0));
             completedCountByQueue.put(queueName, new AtomicInteger(0));
-            
+
             // Start core workers for this queue
             for (int i = 0; i < spec.corePoolSize(); i++) {
                 startWorker(queueName, spec, i + 1, true);
-            }
-            
+        }
+
             log.info("Initialized executor for queue '{}' (core={}, max={}, capacity={})",
                     queueName, spec.corePoolSize(), spec.maxPoolSize(), queueConfig.capacity());
         }
@@ -118,7 +118,7 @@ public class DefaultPoolExecutor implements PoolExecutor {
         synchronized (workersByQueue) {
             List<WorkerThread> workers = workersByQueue.get(queueName);
             if (workers != null) {
-                workers.remove(worker);
+            workers.remove(worker);
             }
         }
         AtomicInteger count = workerCountByQueue.get(queueName);
@@ -227,8 +227,8 @@ public class DefaultPoolExecutor implements PoolExecutor {
 
         // Interrupt all workers
         for (List<WorkerThread> workers : workersByQueue.values()) {
-            for (WorkerThread worker : workers) {
-                worker.interrupt();
+        for (WorkerThread worker : workers) {
+            worker.interrupt();
             }
         }
     }
@@ -241,8 +241,8 @@ public class DefaultPoolExecutor implements PoolExecutor {
 
         // Interrupt all workers
         for (List<WorkerThread> workers : workersByQueue.values()) {
-            for (WorkerThread worker : workers) {
-                worker.interrupt();
+        for (WorkerThread worker : workers) {
+            worker.interrupt();
             }
         }
     }
@@ -257,14 +257,14 @@ public class DefaultPoolExecutor implements PoolExecutor {
         long deadline = System.nanoTime() + unit.toNanos(timeout);
         
         for (List<WorkerThread> workers : workersByQueue.values()) {
-            for (WorkerThread worker : workers) {
-                long remaining = deadline - System.nanoTime();
-                if (remaining <= 0) {
-                    return false;
-                }
-                worker.join(TimeUnit.NANOSECONDS.toMillis(remaining));
-                if (worker.isAlive()) {
-                    return false;
+        for (WorkerThread worker : workers) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) {
+                return false;
+            }
+            worker.join(TimeUnit.NANOSECONDS.toMillis(remaining));
+            if (worker.isAlive()) {
+                return false;
                 }
             }
         }
@@ -277,9 +277,9 @@ public class DefaultPoolExecutor implements PoolExecutor {
             return false;
         }
         for (List<WorkerThread> workers : workersByQueue.values()) {
-            for (WorkerThread worker : workers) {
-                if (worker.isAlive()) {
-                    return false;
+        for (WorkerThread worker : workers) {
+            if (worker.isAlive()) {
+                return false;
                 }
             }
         }

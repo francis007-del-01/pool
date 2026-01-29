@@ -1,6 +1,7 @@
 pool:
   name: "example-pool"
   version: "1.0"
+  syntax-used: CONDITION_TREE
 
   # Queue configurations (shared by scheduler and executors)
   scheduler:

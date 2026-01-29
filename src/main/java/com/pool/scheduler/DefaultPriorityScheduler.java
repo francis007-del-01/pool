@@ -5,7 +5,7 @@ import com.pool.config.QueueConfig;
 import com.pool.config.SchedulerConfig;
 import com.pool.core.PrioritizedPayload;
 import com.pool.core.TaskContext;
-import com.pool.policy.DefaultPolicyEngine;
+import com.pool.policy.PolicyEngineFactory;
 import com.pool.policy.EvaluationResult;
 import com.pool.policy.MatchedPath;
 import com.pool.policy.PolicyEngine;
@@ -34,7 +34,7 @@ public class DefaultPriorityScheduler<T> implements PriorityScheduler<T> {
     private final Object monitor = new Object();
 
     public DefaultPriorityScheduler(PoolConfig config) {
-        this(config, new DefaultPolicyEngine(config));
+        this(config, PolicyEngineFactory.create(config));
     }
 
     public DefaultPriorityScheduler(PoolConfig config, PolicyEngine policyEngine) {
@@ -153,8 +153,8 @@ public class DefaultPriorityScheduler<T> implements PriorityScheduler<T> {
                 monitor.wait(waitMillis);
             }
         }
-        return Optional.empty();
-    }
+            return Optional.empty();
+        }
 
     @Override
     @SuppressWarnings("unchecked")
@@ -188,8 +188,8 @@ public class DefaultPriorityScheduler<T> implements PriorityScheduler<T> {
         while (!shutdown.get()) {
             Optional<PrioritizedPayload<?>> item = strategy.pollNext();
             if (item.isPresent()) {
-                @SuppressWarnings("unchecked")
-                PrioritizedPayload<T> typed = (PrioritizedPayload<T>) item.get();
+        @SuppressWarnings("unchecked")
+        PrioritizedPayload<T> typed = (PrioritizedPayload<T>) item.get();
                 return Optional.of(typed.getPayload());
             }
             

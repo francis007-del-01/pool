@@ -267,6 +267,17 @@ public class OrderService {
 
 ## Configuration Reference
 
+### Condition Syntax Mode
+
+Path: `pool.syntax-used`
+
+Selects which condition syntax is allowed in the priority tree:
+
+| Value | Description |
+|-------|-------------|
+| `CONDITION_TREE` | Structured `condition` blocks (default) |
+| `CONDITION_EXPR` | Flat `condition-expr` expressions |
+
 ### Multi-Queue Executor Configuration
 
 Path: `pool.adapters.executors[]`
@@ -715,6 +726,25 @@ type: ALWAYS_TRUE  # Catch-all, always matches
 type: EXISTS       # Field exists
 type: IS_NULL      # Field is null/missing
 ```
+
+## Condition Expressions (Flat)
+
+As a shorthand, you can use `condition-expr` instead of a structured `condition`. This is useful for
+readable, flat boolean rules.
+
+```yaml
+syntax-used: CONDITION_EXPR
+condition-expr: 'tier == "VIP" AND (channel == "SUPPORT" OR priority >= 8)'
+```
+
+Supported:
+- `AND`, `OR`, `NOT` with parentheses
+- Comparisons: `=`, `==`, `!=`, `>`, `>=`, `<`, `<=`
+- `IN` / `NOT IN` with lists: `region IN ["US","CA"]`
+- `REGEX`, `STARTS_WITH`, `ENDS_WITH`, `CONTAINS`, `EXISTS`, `IS_NULL`
+
+Field names without `$` are treated as `$req.<field>` (e.g., `tier` → `$req.tier`).
+Use `$sys.` explicitly for system fields.
 
 ## Example: E-Commerce Order Processing
 

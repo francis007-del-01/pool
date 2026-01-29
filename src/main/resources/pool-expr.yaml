@@ -1,0 +1,77 @@
+pool:
+  name: "example-pool-expr"
+  version: "1.0"
+  syntax-used: CONDITION_EXPR
+
+  # Queue configurations
+  scheduler:
+    queues:
+      - name: "fast"
+        index: 0
+        capacity: 1000
+      - name: "bulk"
+        index: 1
+        capacity: 500
+
+  # Executors
+  adapters:
+    executors:
+      - core-pool-size: 10
+        max-pool-size: 50
+        keep-alive-seconds: 60
+        thread-name-prefix: "fast-worker-"
+        allow-core-thread-timeout: true
+        queue: "fast"
+
+      - core-pool-size: 5
+        max-pool-size: 20
+        keep-alive-seconds: 120
+        thread-name-prefix: "bulk-worker-"
+        allow-core-thread-timeout: true
+        queue: "bulk"
+
+  # Priority Strategy
+  priority-strategy:
+    type: FIFO
+
+  # Flat priority rules (evaluated sequentially)
+  priority-tree:
+    # Rule 0: VIP customers with high-value transactions
+    - name: "VIP_HIGH_VALUE"
+      condition-expr: 'customerTier == "PLATINUM" AND transactionAmount > 100000'
+      sort-by:
+        field: $req.priority
+        direction: DESC
+      queue: "fast"
+
+    # Rule 1: VIP customers OR urgent requests
+    - name: "VIP_OR_URGENT"
+      condition-expr: 'customerTier == "PLATINUM" OR urgent == true'
+      sort-by:
+        field: $req.urgency
+        direction: DESC
+      queue: "fast"
+
+    # Rule 2: High priority from North America
+    - name: "NA_HIGH_PRIORITY"
+      condition-expr: 'region == "NORTH_AMERICA" AND priority >= 8'
+      sort-by:
+        field: $req.priority
+        direction: DESC
+      queue: "fast"
+
+    # Rule 3: Gold tier with specific channels
+    - name: "GOLD_SUPPORT"
+      condition-expr: 'customerTier == "GOLD" AND (channel == "SUPPORT" OR channel == "ESCALATION")'
+      sort-by:
+        field: $sys.submittedAt
+        direction: ASC
+      queue: "fast"
+
+    # Rule 4: Default catch-all
+    - name: "DEFAULT"
+      condition-expr: 'true'
+      sort-by:
+        field: $sys.submittedAt
+        direction: ASC
+      queue: "bulk"

@@ -13,6 +13,7 @@ import java.util.stream.Collectors;
  * @param executors         Executor specifications (each targets a queue by name)
  * @param scheduler         Priority scheduler configuration
  * @param priorityTree      Priority tree configuration (list of root nodes)
+ * @param syntaxUsed        Condition syntax to use (tree or expression)
  * @param priorityStrategy  Priority strategy configuration (FIFO, TIME_BASED, etc.)
  */
 public record PoolConfig(
@@ -21,6 +22,7 @@ public record PoolConfig(
         List<ExecutorSpec> executors,
         SchedulerConfig scheduler,
         List<PriorityNodeConfig> priorityTree,
+        SyntaxUsed syntaxUsed,
         StrategyConfig priorityStrategy
 ) {
     /**
@@ -60,6 +62,7 @@ public record PoolConfig(
                         SortByConfig.fifo(),
                         "default"
                 )),
+                SyntaxUsed.CONDITION_TREE,
                 StrategyConfig.fifo()
         );
     }

@@ -17,7 +17,7 @@ public class PoolProperties {
      * Path to the Pool configuration file.
      * Supports classpath: prefix for classpath resources.
      */
-    private String configPath = "classpath:pool.yaml";
+    private String configPath = "classpath:pool-expr.yaml";
 
     public boolean isEnabled() {
         return enabled;

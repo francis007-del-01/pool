@@ -67,6 +67,7 @@ public class ConfigLoader {
 
         String name = getString(poolConfig, "name", "default-pool");
         String version = getString(poolConfig, "version", "1.0");
+        SyntaxUsed syntaxUsed = parseSyntaxUsed(poolConfig);
         
         // Parse adapters.executors - each executor targets a named queue
         Map<String, Object> adaptersConfig = (Map<String, Object>) poolConfig.get("adapters");
@@ -77,7 +78,8 @@ public class ConfigLoader {
         SchedulerConfig scheduler = parseSchedulerConfig(schedulerMap);
         
         List<PriorityNodeConfig> priorityTree = parsePriorityTree(
-                (List<Map<String, Object>>) poolConfig.get("priority-tree"));
+                (List<Map<String, Object>>) poolConfig.get("priority-tree"),
+                syntaxUsed);
 
         StrategyConfig strategyConfig = parseStrategyConfig(
                 (Map<String, Object>) poolConfig.get("priority-strategy"));
@@ -108,11 +110,11 @@ public class ConfigLoader {
         }
 
         PoolConfig config = new PoolConfig(
-                name, version, executorSpecs, scheduler, priorityTree, strategyConfig);
+                name, version, executorSpecs, scheduler, priorityTree, syntaxUsed, strategyConfig);
         
-        log.info("Loaded Pool configuration: {} v{} with {} executors, {} queues, {} root nodes, strategy: {}",
-                name, version, executorSpecs.size(), scheduler.queues().size(), priorityTree.size(), 
-                strategyConfig != null ? strategyConfig.type() : "FIFO (default)");
+        log.info("Loaded Pool configuration: {} v{} with {} executors, {} queues, {} root nodes, syntax: {}, strategy: {}",
+                name, version, executorSpecs.size(), scheduler.queues().size(), priorityTree.size(),
+                syntaxUsed, strategyConfig != null ? strategyConfig.type() : "FIFO (default)");
         
         return config;
     }
@@ -205,32 +207,78 @@ public class ConfigLoader {
     }
 
     @SuppressWarnings("unchecked")
-    private static List<PriorityNodeConfig> parsePriorityTree(List<Map<String, Object>> list) {
+    private static List<PriorityNodeConfig> parsePriorityTree(List<Map<String, Object>> list,
+                                                              SyntaxUsed syntaxUsed) {
         if (list == null) {
             return List.of();
         }
         List<PriorityNodeConfig> nodes = new ArrayList<>();
         for (Map<String, Object> item : list) {
-            nodes.add(parsePriorityNode(item));
+            nodes.add(parsePriorityNode(item, syntaxUsed));
         }
         return nodes;
     }
 
     @SuppressWarnings("unchecked")
-    private static PriorityNodeConfig parsePriorityNode(Map<String, Object> map) {
+    private static PriorityNodeConfig parsePriorityNode(Map<String, Object> map, SyntaxUsed syntaxUsed) {
         String name = getString(map, "name", "unnamed");
-        ConditionConfig condition = parseCondition((Map<String, Object>) map.get("condition"));
+        ConditionConfig condition = parseConditionBySyntax(map, name, syntaxUsed);
         
         List<PriorityNodeConfig> nestedLevels = null;
         List<Map<String, Object>> nestedList = (List<Map<String, Object>>) map.get("nested-levels");
         if (nestedList != null && !nestedList.isEmpty()) {
-            nestedLevels = parsePriorityTree(nestedList);
+            if (syntaxUsed == SyntaxUsed.CONDITION_EXPR) {
+                throw new ConfigurationException("Priority node '" + name
+                        + "' has nested-levels but syntax-used is CONDITION_EXPR. "
+                        + "Expression mode uses flat sequential evaluation - remove nested-levels.");
+            }
+            nestedLevels = parsePriorityTree(nestedList, syntaxUsed);
         }
         
         SortByConfig sortBy = parseSortBy((Map<String, Object>) map.get("sort-by"));
         String queue = getString(map, "queue", null);
         
         return new PriorityNodeConfig(name, condition, nestedLevels, sortBy, queue);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ConditionConfig parseConditionBySyntax(Map<String, Object> map,
+                                                          String nodeName,
+                                                          SyntaxUsed syntaxUsed) {
+        String conditionExpr = getString(map, "condition-expr", null);
+        if (conditionExpr == null) {
+            conditionExpr = getString(map, "conditionExpr", null);
+        }
+        Map<String, Object> conditionMap = (Map<String, Object>) map.get("condition");
+
+        if (syntaxUsed == SyntaxUsed.CONDITION_TREE) {
+            if (conditionExpr != null) {
+                throw new ConfigurationException("Priority node '" + nodeName
+                        + "' uses condition-expr but syntax-used is CONDITION_TREE");
+            }
+            return parseCondition(conditionMap);
+        }
+
+        if (syntaxUsed == SyntaxUsed.CONDITION_EXPR) {
+            if (conditionMap != null) {
+                throw new ConfigurationException("Priority node '" + nodeName
+                        + "' uses condition but syntax-used is CONDITION_EXPR");
+            }
+            return ConditionExpressionParser.parse(conditionExpr);
+        }
+
+        return ConditionConfig.alwaysTrue();
+    }
+
+    private static SyntaxUsed parseSyntaxUsed(Map<String, Object> poolConfig) {
+        String syntax = getString(poolConfig, "syntax-used", null);
+        if (syntax == null) {
+            syntax = getString(poolConfig, "syntaxUsed", null);
+        }
+        if (syntax == null || syntax.isBlank()) {
+            return SyntaxUsed.CONDITION_TREE;
+        }
+        return SyntaxUsed.valueOf(syntax.toUpperCase().replace("-", "_"));
     }
 
     @SuppressWarnings("unchecked")

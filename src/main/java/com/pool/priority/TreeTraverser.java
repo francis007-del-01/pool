@@ -75,7 +75,7 @@ public class TreeTraverser {
     private static final int MAX_DEPTH = 9;
 
     private LeafResult traverseRecursive(List<PriorityNodeConfig> nodes, TaskContext context,
-                                         List<MatchedNode> path, int level) {
+                                            List<MatchedNode> path, int level) {
         if (nodes == null || nodes.isEmpty()) {
             return null;
         }
