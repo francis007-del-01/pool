@@ -275,8 +275,17 @@ Selects which condition syntax is allowed in the priority tree:
 
 | Value | Description |
 |-------|-------------|
-| `CONDITION_TREE` | Structured `condition` blocks (default) |
-| `CONDITION_EXPR` | Flat `condition-expr` expressions |
+| `CONDITION_TREE` | Structured `condition` blocks (default) - supports nested hierarchical trees |
+| `CONDITION_EXPR` | Flat `condition-expr` expressions - sequential evaluation, simpler syntax |
+
+**Mode Selection:**
+- **CONDITION_TREE**: Use for complex nested hierarchies with multiple levels
+- **CONDITION_EXPR**: Use for flat, sequential rules that are easier to read and maintain
+
+**Validation:**
+- `CONDITION_TREE` mode: Nodes must use `condition:` (map) and can have `nested-levels`
+- `CONDITION_EXPR` mode: Nodes must use `condition-expr:` (string) and cannot have `nested-levels`
+- Mixing syntaxes within a single config is not allowed
 
 ### Multi-Queue Executor Configuration
 
@@ -624,10 +633,13 @@ Consume from the priority scheduler and either execute locally or forward to ext
 ### Package Organization
 
 - `com.pool.core` — core engine types and context (`TaskContext`, `TaskContextFactory`)
-- `com.pool.policy` — policy evaluation (`DefaultPolicyEngine`)
+- `com.pool.policy` — policy evaluation (`DefaultPolicyEngine`, `ExpressionPolicyEngine`)
 - `com.pool.priority` — priority keys, vectors, calculators
 - `com.pool.scheduler` — priority scheduler API and default implementation
 - `com.pool.config` — configuration records (`PoolConfig`, `ExecutorSpec`, `QueueConfig`)
+- `com.pool.config.expression` — expression parser components (`ExpressionTokenizer`, `ExpressionParser`, `ExpressionConfig`)
+- `com.pool.condition` — condition evaluation interfaces and implementations
+- `com.pool.variable` — variable resolution (`$req.*`, `$sys.*`)
 - `com.pool.adapter.executor` — in-process thread pool executor
 - `com.pool.adapter.spring` — Spring Boot auto-configuration
 
@@ -651,6 +663,50 @@ Consume from the priority scheduler and either execute locally or forward to ext
 
 **B) Kafka/External queue relay**  
 `submit` → priority scheduler → `getNext` → publish to Kafka/Redis/SQS, etc.
+
+### Configuration Loading Flow
+
+Configuration is loaded at application startup through a multi-stage pipeline:
+
+```
+application.properties → ConfigLoader → YAML Parser → Section Parsers → PoolConfig
+```
+
+**1. Spring Boot Integration**
+```properties
+# application.properties
+pool.config-path=classpath:pool.yaml  # or file path
+```
+
+**2. Resource Resolution**
+- `classpath:` prefix → loads from `src/main/resources/`
+- No prefix → loads from filesystem
+
+**3. YAML Parsing**
+```java
+ConfigLoader.load("classpath:pool.yaml")
+  → SnakeYAML parses YAML into nested maps
+  → Extract root config (supports `pool:` wrapper or root-level)
+```
+
+**4. Section Parsing**
+- `syntax-used` → determines condition parsing mode
+- `adapters.executors` → `List<ExecutorSpec>`
+- `scheduler.queues` → `SchedulerConfig`
+- `priority-tree` → `List<PriorityNodeConfig>`
+  - If `CONDITION_TREE`: parse nested YAML maps
+  - If `CONDITION_EXPR`: tokenize and parse expression strings
+- `priority-strategy` → `StrategyConfig`
+
+**5. Validation**
+- Priority tree not empty (creates default if needed)
+- Executors reference valid queues
+- Syntax mode consistency (no mixing `condition` and `condition-expr`)
+
+**6. Engine Selection**
+Based on `syntax-used`, the appropriate policy engine is created:
+- `CONDITION_TREE` → `DefaultPolicyEngine` (hierarchical tree traversal)
+- `CONDITION_EXPR` → `ExpressionPolicyEngine` (flat sequential evaluation)
 
 ---
 
@@ -745,6 +801,88 @@ Supported:
 
 Field names without `$` are treated as `$req.<field>` (e.g., `tier` → `$req.tier`).
 Use `$sys.` explicitly for system fields.
+
+### Expression Parser Architecture
+
+The expression parser is modular and cleanly separated:
+
+```
+Expression String → Tokenizer → Tokens → Parser → ConditionConfig Tree
+```
+
+**Package: `com.pool.config.expression`**
+
+| Component | Responsibility |
+|-----------|---------------|
+| `ExpressionConfig` | Constants for keywords (AND, OR, IN), operators (==, !=, >), and prefixes |
+| `TokenType` | Enum of all token types (IDENT, STRING, NUMBER, AND, OR, EQ, etc.) |
+| `Token` | Immutable record: `(type, text, literal, position)` |
+| `ExpressionTokenizer` | Converts string → List&lt;Token&gt; (lexical analysis) |
+| `ExpressionParser` | Converts List&lt;Token&gt; → ConditionConfig tree (syntax analysis) |
+| `ConditionExpressionParser` | Facade that orchestrates tokenizer + parser |
+
+**Parsing Flow:**
+
+1. **Tokenize**: `"tier == \"VIP\" AND priority > 8"` → `[IDENT(tier), EQ, STRING(VIP), AND, IDENT(priority), GT, NUMBER(8)]`
+2. **Parse**: Recursive descent with precedence: `NOT` > `AND` > `OR` (parentheses override)
+3. **Output**: ConditionConfig tree (same structure as YAML-based conditions)
+
+**Example:**
+
+```java
+// Input
+String expr = "tier == \"PLATINUM\" AND (amount > 1000 OR urgent == true)";
+
+// Parsing
+ConditionConfig config = ConditionExpressionParser.parse(expr);
+
+// Result tree:
+// AND
+// ├── EQUALS ($req.tier, "PLATINUM")
+// └── OR
+//     ├── GREATER_THAN ($req.amount, 1000)
+//     └── EQUALS ($req.urgent, true)
+```
+
+**Benefits:**
+- **Maintainable**: Each class has a single responsibility
+- **Testable**: Components can be tested independently
+- **Extensible**: Easy to add new operators or keywords via `ExpressionConfig`
+- **Configurable**: All keywords/operators in one place
+
+### Syntax Comparison
+
+The same rule can be expressed in both modes:
+
+**CONDITION_TREE Mode (Hierarchical):**
+```yaml
+syntax-used: CONDITION_TREE
+priority-tree:
+  - name: "VIP_OR_HIGH_VALUE"
+    condition:
+      type: OR
+      conditions:
+        - type: EQUALS
+          field: $req.tier
+          value: "PLATINUM"
+        - type: GREATER_THAN
+          field: $req.amount
+          value: 50000
+    queue: "fast"
+```
+
+**CONDITION_EXPR Mode (Flat):**
+```yaml
+syntax-used: CONDITION_EXPR
+priority-tree:
+  - name: "VIP_OR_HIGH_VALUE"
+    condition-expr: 'tier == "PLATINUM" OR amount > 50000'
+    queue: "fast"
+```
+
+Both produce the same `ConditionConfig` tree and evaluate identically. Choose based on complexity:
+- Simple, flat rules → `CONDITION_EXPR` (more readable)
+- Complex nested hierarchies → `CONDITION_TREE` (more structured)
 
 ## Example: E-Commerce Order Processing
 
