@@ -63,7 +63,7 @@ public class DefaultPoolExecutor implements PoolExecutor {
             throw new IllegalArgumentException("No executors configured under adapters.executors");
         }
 
-        // Create workers for each executor spec
+        // Initialize worker tracking per queue
         for (ExecutorSpec spec : config.executors()) {
             String queueName = spec.queueName();
             QueueConfig queueConfig = config.scheduler().getQueue(queueName);
@@ -77,11 +77,6 @@ public class DefaultPoolExecutor implements PoolExecutor {
             activeCountByQueue.put(queueName, new AtomicInteger(0));
             completedCountByQueue.put(queueName, new AtomicInteger(0));
 
-            // Start workers for this queue
-            for (int i = 0; i < spec.workerCount(); i++) {
-                startWorker(queueName, spec, i + 1);
-            }
-
             log.info("Initialized executor for queue '{}' (workers={}, capacity={})",
                     queueName, spec.workerCount(), queueConfig.capacity());
         }
@@ -89,13 +84,14 @@ public class DefaultPoolExecutor implements PoolExecutor {
         log.info("PoolExecutor initialized: {} with {} queues", config.name(), config.executors().size());
     }
 
-    private void startWorker(String queueName, ExecutorSpec spec, int workerId) {
+    private void startWorker(String queueName, ExecutorSpec spec, int workerId, AtomicInteger workerCount) {
         WorkerThread worker = new WorkerThread(
                 workerId,
                 queueName,
                 spec,
                 priorityScheduler,
                 shutdown,
+                workerCount,
                 activeCountByQueue.get(queueName),
                 completedCountByQueue.get(queueName),
                 this::removeWorker,
@@ -105,10 +101,38 @@ public class DefaultPoolExecutor implements PoolExecutor {
         synchronized (workersByQueue) {
             workersByQueue.get(queueName).add(worker);
         }
-        workerCountByQueue.get(queueName).incrementAndGet();
         worker.start();
         
         log.debug("Started worker {} for queue '{}'", worker.getName(), queueName);
+    }
+
+    private void startWorkerIfAvailable(String queueName) {
+        if (shutdown.get()) {
+            return;
+        }
+        ExecutorSpec spec = config.getExecutorByQueue(queueName);
+        if (spec == null) {
+            return;
+        }
+        AtomicInteger workerCount = workerCountByQueue.get(queueName);
+        if (workerCount == null) {
+            return;
+        }
+        while (true) {
+            int current = workerCount.get();
+            if (current >= spec.workerCount()) {
+                return;
+            }
+            if (workerCount.compareAndSet(current, current + 1)) {
+                try {
+                    startWorker(queueName, spec, current + 1, workerCount);
+                } catch (RuntimeException e) {
+                    workerCount.decrementAndGet();
+                    throw e;
+                }
+                return;
+            }
+        }
     }
 
     private void removeWorker(WorkerThread worker) {
@@ -118,10 +142,6 @@ public class DefaultPoolExecutor implements PoolExecutor {
             if (workers != null) {
             workers.remove(worker);
             }
-        }
-        AtomicInteger count = workerCountByQueue.get(queueName);
-        if (count != null) {
-            count.decrementAndGet();
         }
         log.debug("Removed worker {} from queue '{}'", worker.getName(), queueName);
     }
@@ -155,8 +175,7 @@ public class DefaultPoolExecutor implements PoolExecutor {
         log.debug("Task {} submitted to queue '{}' (queue size: {})",
                 context.getTaskId(), queueName, priorityScheduler.size(queueName));
 
-        // Scale up workers for this queue if needed
-        maybeScaleUp(queueName);
+        startWorkerIfAvailable(queueName);
     }
 
     @Override
@@ -188,33 +207,9 @@ public class DefaultPoolExecutor implements PoolExecutor {
         log.debug("Task {} submitted to queue '{}' (queue size: {})",
                 context.getTaskId(), queueName, priorityScheduler.size(queueName));
 
-        // Scale up workers for this queue if needed
-        maybeScaleUp(queueName);
+        startWorkerIfAvailable(queueName);
 
         return futureTask;
-    }
-
-    /**
-     * Scale up workers for a specific queue if needed.
-     */
-    private void maybeScaleUp(String queueName) {
-        ExecutorSpec spec = config.getExecutorByQueue(queueName);
-        if (spec == null) {
-            return;
-        }
-        
-        AtomicInteger workerCount = workerCountByQueue.get(queueName);
-        int currentWorkers = workerCount != null ? workerCount.get() : 0;
-        int queueSize = priorityScheduler.size(queueName);
-
-        if (queueSize > 0 && currentWorkers < spec.workerCount()) {
-            synchronized (workersByQueue) {
-                int count = workerCountByQueue.get(queueName).get();
-                if (count < spec.workerCount() && !shutdown.get()) {
-                    startWorker(queueName, spec, count + 1);
-                }
-            }
-        }
     }
 
     @Override

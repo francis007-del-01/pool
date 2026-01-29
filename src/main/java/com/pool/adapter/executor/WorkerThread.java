@@ -19,6 +19,7 @@ final class WorkerThread extends Thread {
     private final ExecutorSpec execSpec;
     private final PriorityScheduler<ExecutableTask> priorityScheduler;
     private final AtomicBoolean shutdown;
+    private final AtomicInteger workerCount;
     private final AtomicInteger activeCount;
     private final AtomicInteger completedCount;
     private final Consumer<WorkerThread> onRemove;
@@ -30,6 +31,7 @@ final class WorkerThread extends Thread {
             ExecutorSpec execSpec,
             PriorityScheduler<ExecutableTask> priorityScheduler,
             AtomicBoolean shutdown,
+            AtomicInteger workerCount,
             AtomicInteger activeCount,
             AtomicInteger completedCount,
             Consumer<WorkerThread> onRemove,
@@ -41,6 +43,7 @@ final class WorkerThread extends Thread {
         this.execSpec = execSpec;
         this.priorityScheduler = priorityScheduler;
         this.shutdown = shutdown;
+        this.workerCount = workerCount;
         this.activeCount = activeCount;
         this.completedCount = completedCount;
         this.onRemove = onRemove;
@@ -108,6 +111,7 @@ final class WorkerThread extends Thread {
         if (!shutdown.get()) {
             onRemove.accept(this);
         }
+        workerCount.decrementAndGet();
 
         log.debug("Worker {} stopped", workerId);
     }
