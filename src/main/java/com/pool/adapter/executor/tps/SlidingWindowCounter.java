@@ -112,19 +112,9 @@ public class SlidingWindowCounter {
         cleanupExpiredBuckets();
         
         int total = 0;
-        long now = System.currentTimeMillis();
-        long windowStart = now - windowSizeMs;
-        
-        // Count actual entries within the window across all buckets
         for (int i = 0; i < bucketCount; i++) {
-            ConcurrentHashMap<String, Long> bucket = buckets[i];
-            for (Long timestamp : bucket.values()) {
-                if (timestamp >= windowStart && timestamp <= now) {
-                    total++;
-                }
-            }
+            total += buckets[i].size();
         }
-        
         return total;
     }
 
