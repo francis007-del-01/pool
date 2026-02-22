@@ -98,65 +98,7 @@ pool:
       executor: "bulk"           # Route to bulk executor
 ```
 
-### 2. Initialize the Priority Scheduler (Recommended)
-
-For standalone use (without executor adapter), you can configure queues directly:
-
-```yaml
-# pool-scheduler.yaml - standalone scheduler config
-pool:
-  name: "my-scheduler"
-  
-  scheduler:
-    queues:
-      - name: "fast"
-        index: 0
-        capacity: 1000
-      - name: "bulk"
-        index: 1
-        capacity: 5000
-  
-  priority-tree:
-    - name: "HIGH_PRIORITY"
-      condition: "$req.priority > 80"
-      queue: "fast"
-    - name: "DEFAULT"
-      condition: "true"
-      queue: "bulk"
-```
-
-```java
-import com.pool.config.ConfigLoader;
-import com.pool.config.PoolConfig;
-import com.pool.scheduler.DefaultPriorityScheduler;
-import com.pool.scheduler.PriorityScheduler;
-
-// Load configuration
-PoolConfig config = ConfigLoader.load("classpath:pool-scheduler.yaml");
-
-// Create priority scheduler (supports multiple queues)
-PriorityScheduler<MyPayload> scheduler = new DefaultPriorityScheduler<>(config);
-```
-
-### 3. Submit Payloads (Prioritization First)
-
-```java
-import com.pool.core.TaskContext;
-import com.pool.core.TaskContextFactory;
-
-TaskContext ctx = TaskContextFactory.create(jsonPayload, contextMap);
-
-// submit() returns the queue name the task was routed to
-String queueName = scheduler.submit(ctx, payload);
-
-// Pull from first non-empty queue (by index order)
-MyPayload next = scheduler.getNext();
-
-// Or pull from a specific queue
-MyPayload fastTask = scheduler.getNext("fast");
-```
-
-### 4. Initialize the TPS-Based Executor
+### 2. Initialize the TPS-Based Executor
 
 ```java
 import com.pool.config.ConfigLoader;
@@ -172,7 +114,7 @@ PoolConfig config = ConfigLoader.load("classpath:pool.yaml");
 PoolExecutor executor = new TpsPoolExecutor(config);
 ```
 
-### 5. Submit Tasks (Adapter)
+### 3. Submit Tasks
 
 ```java
 import com.pool.core.TaskContext;
@@ -204,7 +146,7 @@ executor.submit(taskContext, () -> {
 });
 ```
 
-### 6. Shutdown
+### 4. Shutdown
 
 ```java
 // Graceful shutdown - finish queued tasks
@@ -289,12 +231,11 @@ Each executor defines a TPS limit and optional parent:
 - If parent at limit, child requests are queued
 - Child TPS cannot exceed parent TPS
 
-### Queue Configuration (Standalone Scheduler)
+### Standalone Scheduler (Without Executor)
 
-For standalone scheduler use (without TPS executor), define queues under `scheduler`:
+For integrating with external systems (Kafka, Redis, etc.), use the standalone scheduler:
 
-Path: `pool.scheduler`
-
+**Configuration:**
 ```yaml
 pool:
   name: "my-scheduler"
@@ -318,13 +259,28 @@ pool:
       queue: "bulk"
 ```
 
+**Usage:**
+```java
+PoolConfig config = ConfigLoader.load("classpath:pool-scheduler.yaml");
+PriorityScheduler<MyPayload> scheduler = new DefaultPriorityScheduler<>(config);
+
+// Submit - returns queue name
+String queueName = scheduler.submit(ctx, payload);
+
+// Pull from first non-empty queue (by index order)
+MyPayload next = scheduler.getNext();
+
+// Pull from specific queue
+MyPayload task = scheduler.getNext("fast");
+```
+
 | Property | Default | Description |
 |----------|---------|-------------|
 | `queues[].name` | required | Queue name |
 | `queues[].index` | auto | Priority index (lower = higher priority) |
 | `queues[].capacity` | 1000 | Maximum queue capacity |
 
-**Note:** For TPS-based executors, use `adapters.executors` with `executor:` in priority-tree instead.
+**Note:** For TPS-based execution, use `adapters.executors` with `executor:` in priority-tree instead.
 
 ### Priority Strategy
 
