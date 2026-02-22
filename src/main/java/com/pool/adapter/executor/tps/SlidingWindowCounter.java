@@ -1,58 +1,43 @@
 package com.pool.adapter.executor.tps;
 
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Sliding window counter for tracking TPS using unique request identifiers.
- * Uses a time-bucketed approach for efficient counting and cleanup.
+ * Uses a global time-ordered queue for O(1) counting and efficient expiry.
+ *
+ * <p>Design:
+ * <ul>
+ *   <li>A {@link ConcurrentLinkedQueue} holds entries in insertion (time) order.</li>
+ *   <li>A {@link ConcurrentHashMap} provides O(1) dedup lookups by identifier.</li>
+ *   <li>An {@link AtomicInteger} tracks the live count — no scanning required.</li>
+ *   <li>Expired entries are drained from the queue head on every mutating operation.</li>
+ * </ul>
  */
 public class SlidingWindowCounter {
 
-    private static final int DEFAULT_BUCKET_COUNT = 10;
-    
     private final long windowSizeMs;
-    private final int bucketCount;
-    private final long bucketSizeMs;
-    
-    // Each bucket contains a set of unique identifiers and their count
-    private final ConcurrentHashMap<String, Long>[] buckets;
-    private final AtomicInteger[] bucketCounts;
-    private final ReentrantLock cleanupLock = new ReentrantLock();
-    
-    private volatile long lastCleanupTime;
+
+    // Global time-ordered queue — oldest entries at the head
+    private final ConcurrentLinkedQueue<Entry> timeQueue = new ConcurrentLinkedQueue<>();
+
+    // Dedup map: identifier → timestamp (for contains / tryAdd checks)
+    private final ConcurrentHashMap<String, Long> identifiers = new ConcurrentHashMap<>();
+
+    // Live count of identifiers currently in the window
+    private final AtomicInteger size = new AtomicInteger(0);
 
     public SlidingWindowCounter() {
         this(1000); // Default 1 second window
     }
 
     public SlidingWindowCounter(long windowSizeMs) {
-        this(windowSizeMs, DEFAULT_BUCKET_COUNT);
-    }
-
-    @SuppressWarnings("unchecked")
-    public SlidingWindowCounter(long windowSizeMs, int bucketCount) {
         if (windowSizeMs <= 0) {
             throw new IllegalArgumentException("Window size must be positive");
         }
-        if (bucketCount <= 0) {
-            throw new IllegalArgumentException("Bucket count must be positive");
-        }
-        
         this.windowSizeMs = windowSizeMs;
-        this.bucketCount = bucketCount;
-        this.bucketSizeMs = windowSizeMs / bucketCount;
-        
-        this.buckets = new ConcurrentHashMap[bucketCount];
-        this.bucketCounts = new AtomicInteger[bucketCount];
-        
-        for (int i = 0; i < bucketCount; i++) {
-            buckets[i] = new ConcurrentHashMap<>();
-            bucketCounts[i] = new AtomicInteger(0);
-        }
-        
-        this.lastCleanupTime = System.currentTimeMillis();
     }
 
     /**
@@ -64,26 +49,25 @@ public class SlidingWindowCounter {
         if (identifier == null || identifier.isEmpty()) {
             throw new IllegalArgumentException("Identifier cannot be null or empty");
         }
-        
-        cleanupExpiredBuckets();
-        
+
+        evictExpired();
+
         long now = System.currentTimeMillis();
-        int bucketIndex = getBucketIndex(now);
-        
-        ConcurrentHashMap<String, Long> bucket = buckets[bucketIndex];
-        
-        // Check if identifier already exists in any active bucket
-        if (containsInWindow(identifier, now)) {
+
+        // If identifier already in window, reject
+        Long existing = identifiers.get(identifier);
+        if (existing != null && existing >= now - windowSizeMs) {
             return false;
         }
-        
-        // Add to current bucket
-        Long previous = bucket.putIfAbsent(identifier, now);
+
+        // Atomically insert only if absent
+        Long previous = identifiers.putIfAbsent(identifier, now);
         if (previous == null) {
-            bucketCounts[bucketIndex].incrementAndGet();
+            timeQueue.offer(new Entry(identifier, now));
+            size.incrementAndGet();
             return true;
         }
-        
+
         return false;
     }
 
@@ -95,27 +79,22 @@ public class SlidingWindowCounter {
         if (identifier == null || identifier.isEmpty()) {
             throw new IllegalArgumentException("Identifier cannot be null or empty");
         }
-        
-        cleanupExpiredBuckets();
-        
+
+        evictExpired();
+
         long now = System.currentTimeMillis();
-        int bucketIndex = getBucketIndex(now);
-        
-        buckets[bucketIndex].put(identifier, now);
-        bucketCounts[bucketIndex].incrementAndGet();
+        identifiers.put(identifier, now);
+        timeQueue.offer(new Entry(identifier, now));
+        size.incrementAndGet();
     }
 
     /**
      * Get current count of unique identifiers in the window.
+     * O(1) — reads the maintained counter after evicting expired entries.
      */
     public int count() {
-        cleanupExpiredBuckets();
-        
-        int total = 0;
-        for (int i = 0; i < bucketCount; i++) {
-            total += buckets[i].size();
-        }
-        return total;
+        evictExpired();
+        return size.get();
     }
 
     /**
@@ -125,7 +104,9 @@ public class SlidingWindowCounter {
         if (identifier == null || identifier.isEmpty()) {
             return false;
         }
-        return containsInWindow(identifier, System.currentTimeMillis());
+        evictExpired();
+        Long timestamp = identifiers.get(identifier);
+        return timestamp != null && timestamp >= System.currentTimeMillis() - windowSizeMs;
     }
 
     /**
@@ -135,12 +116,9 @@ public class SlidingWindowCounter {
         if (identifier == null || identifier.isEmpty()) {
             return;
         }
-        
-        for (int i = 0; i < bucketCount; i++) {
-            if (buckets[i].remove(identifier) != null) {
-                bucketCounts[i].decrementAndGet();
-                return;
-            }
+        if (identifiers.remove(identifier) != null) {
+            size.decrementAndGet();
+            // Entry remains in timeQueue but will be skipped during eviction
         }
     }
 
@@ -148,10 +126,9 @@ public class SlidingWindowCounter {
      * Clear all entries from the window.
      */
     public void clear() {
-        for (int i = 0; i < bucketCount; i++) {
-            buckets[i].clear();
-            bucketCounts[i].set(0);
-        }
+        timeQueue.clear();
+        identifiers.clear();
+        size.set(0);
     }
 
     /**
@@ -161,48 +138,32 @@ public class SlidingWindowCounter {
         return windowSizeMs;
     }
 
-    private boolean containsInWindow(String identifier, long now) {
-        long windowStart = now - windowSizeMs;
-        
-        for (int i = 0; i < bucketCount; i++) {
-            Long timestamp = buckets[i].get(identifier);
-            if (timestamp != null && timestamp >= windowStart) {
-                return true;
+    /**
+     * Drain expired entries from the head of the time-ordered queue.
+     * Since entries are inserted in time order, we only need to poll from the head
+     * until we hit a non-expired entry.
+     */
+    private void evictExpired() {
+        long windowStart = System.currentTimeMillis() - windowSizeMs;
+
+        Entry head;
+        while ((head = timeQueue.peek()) != null && head.timestamp < windowStart) {
+            // Remove from queue
+            Entry polled = timeQueue.poll();
+            if (polled == null) {
+                break;
             }
-        }
-        return false;
-    }
 
-    private int getBucketIndex(long timestamp) {
-        return (int) ((timestamp / bucketSizeMs) % bucketCount);
-    }
-
-    private void cleanupExpiredBuckets() {
-        long now = System.currentTimeMillis();
-        
-        // Only cleanup periodically to avoid overhead
-        if (now - lastCleanupTime < bucketSizeMs) {
-            return;
-        }
-        
-        if (cleanupLock.tryLock()) {
-            try {
-                long windowStart = now - windowSizeMs;
-                
-                for (int i = 0; i < bucketCount; i++) {
-                    ConcurrentHashMap<String, Long> bucket = buckets[i];
-                    
-                    // Remove expired entries
-                    bucket.entrySet().removeIf(entry -> entry.getValue() < windowStart);
-                    
-                    // Update count
-                    bucketCounts[i].set(bucket.size());
-                }
-                
-                lastCleanupTime = now;
-            } finally {
-                cleanupLock.unlock();
+            // Only decrement if this entry still owns the slot in the dedup map.
+            // It may have been removed already by remove() or replaced by a newer add().
+            if (identifiers.remove(polled.identifier, polled.timestamp)) {
+                size.decrementAndGet();
             }
         }
     }
+
+    /**
+     * Immutable entry in the time-ordered queue.
+     */
+    private record Entry(String identifier, long timestamp) {}
 }
