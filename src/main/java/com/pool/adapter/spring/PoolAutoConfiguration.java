@@ -2,8 +2,8 @@ package com.pool.adapter.spring;
 
 import com.pool.config.ConfigLoader;
 import com.pool.config.PoolConfig;
-import com.pool.adapter.executor.DefaultPoolExecutor;
 import com.pool.adapter.executor.PoolExecutor;
+import com.pool.adapter.executor.tps.TpsPoolExecutor;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,7 +36,7 @@ public class PoolAutoConfiguration {
     @ConditionalOnMissingBean
     public PoolExecutor poolExecutor(PoolConfig config) {
         log.info("Creating PoolExecutor: {}", config.name());
-        this.poolExecutor = new DefaultPoolExecutor(config);
+        this.poolExecutor = new TpsPoolExecutor(config);
         return this.poolExecutor;
     }
 

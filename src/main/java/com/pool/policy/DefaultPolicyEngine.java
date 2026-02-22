@@ -1,7 +1,6 @@
 package com.pool.policy;
 
-import com.pool.condition.ConditionEvaluator;
-import com.pool.condition.DefaultConditionEvaluator;
+import com.pool.expression.ExpressionEvaluator;
 import com.pool.config.PoolConfig;
 import com.pool.core.TaskContext;
 import com.pool.priority.PriorityCalculator;
@@ -24,15 +23,15 @@ public class DefaultPolicyEngine implements PolicyEngine {
 
     private volatile PoolConfig config;
     private final VariableResolver variableResolver;
-    private final ConditionEvaluator conditionEvaluator;
+    private final ExpressionEvaluator expressionEvaluator;
     private final TreeTraverser treeTraverser;
     private final PriorityCalculator priorityCalculator;
 
     public DefaultPolicyEngine(PoolConfig config) {
         this.config = config;
         this.variableResolver = new DefaultVariableResolver();
-        this.conditionEvaluator = new DefaultConditionEvaluator(variableResolver);
-        this.treeTraverser = new TreeTraverser(conditionEvaluator);
+        this.expressionEvaluator = new ExpressionEvaluator(variableResolver);
+        this.treeTraverser = new TreeTraverser(expressionEvaluator);
         this.priorityCalculator = new PriorityCalculator(variableResolver);
         
         log.info("PolicyEngine initialized with config: {} v{}", config.name(), config.version());

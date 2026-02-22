@@ -1,10 +1,9 @@
 package com.pool.priority;
 
-import com.pool.condition.Condition;
-import com.pool.condition.ConditionEvaluator;
 import com.pool.config.PriorityNodeConfig;
 import com.pool.config.SortByConfig;
 import com.pool.core.TaskContext;
+import com.pool.expression.ExpressionEvaluator;
 import com.pool.policy.MatchedNode;
 import com.pool.policy.MatchedPath;
 import org.slf4j.Logger;
@@ -27,10 +26,10 @@ public class TreeTraverser {
 
     private static final Logger log = LoggerFactory.getLogger(TreeTraverser.class);
 
-    private final ConditionEvaluator conditionEvaluator;
+    private final ExpressionEvaluator expressionEvaluator;
 
-    public TreeTraverser(ConditionEvaluator conditionEvaluator) {
-        this.conditionEvaluator = conditionEvaluator;
+    public TreeTraverser(ExpressionEvaluator expressionEvaluator) {
+        this.expressionEvaluator = expressionEvaluator;
     }
 
     /**
@@ -50,9 +49,9 @@ public class TreeTraverser {
         LeafResult leafResult = traverseRecursive(nodes, context, path, 0);
         
         if (leafResult != null) {
-            MatchedPath matchedPath = new MatchedPath(path, leafResult.sortBy, leafResult.queueName);
-            log.debug("Matched path: {} -> queue: {} for task {}", 
-                    matchedPath.toPathString(), leafResult.queueName, context.getTaskId());
+            MatchedPath matchedPath = new MatchedPath(path, leafResult.sortBy, leafResult.executor);
+            log.debug("Matched path: {} -> executor: {} for task {}", 
+                    matchedPath.toPathString(), leafResult.executor, context.getTaskId());
             return Optional.of(matchedPath);
         }
 
@@ -60,8 +59,8 @@ public class TreeTraverser {
         return Optional.empty();
     }
 
-    /** Internal result containing both sortBy and queue name from leaf node. */
-    private record LeafResult(SortByConfig sortBy, String queueName) {}
+    /** Internal result containing sortBy and executor from leaf node. */
+    private record LeafResult(SortByConfig sortBy, String executor) {}
 
     /**
      * Recursive traversal of the tree.
@@ -90,12 +89,12 @@ public class TreeTraverser {
             PriorityNodeConfig node = nodes.get(i);
             int branchIndex = i + 1; // 1-based index
 
-            // Evaluate condition
-            Condition condition = conditionEvaluator.create(node.condition());
-            boolean matches = condition.evaluate(context);
+            // Evaluate condition expression
+            String expression = node.condition();
+            boolean matches = expressionEvaluator.evaluate(expression, context);
 
-            log.trace("Level {}, Node {} '{}': condition {} = {}", 
-                    level, branchIndex, node.name(), condition, matches);
+            log.trace("Level {}, Node {} '{}': expression '{}' = {}", 
+                    level, branchIndex, node.name(), expression, matches);
 
             if (!matches) {
                 continue; // Try next sibling
@@ -105,7 +104,7 @@ public class TreeTraverser {
             if (node.isLeaf()) {
                 // Leaf node - we have a complete match
                 path.add(new MatchedNode(node.name(), branchIndex));
-                return new LeafResult(node.getEffectiveSortBy(), node.queue());
+                return new LeafResult(node.getEffectiveSortBy(), node.executor());
             }
 
             // Non-leaf node - try to match children

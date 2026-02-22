@@ -10,12 +10,12 @@ import java.util.stream.Collectors;
  *
  * @param nodes     List of matched nodes from root to leaf
  * @param sortBy    Sort-by configuration from the leaf node
- * @param queueName Target queue name from the leaf node
+ * @param executor  Target executor ID for TPS-based routing
  */
 public record MatchedPath(
         List<MatchedNode> nodes,
         SortByConfig sortBy,
-        String queueName
+        String executor
 ) {
     /**
      * Get the depth of the matched path.

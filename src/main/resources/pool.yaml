@@ -1,127 +1,103 @@
 pool:
   name: "example-pool"
   version: "1.0"
-  syntax-used: CONDITION_TREE
 
-  # Queue configurations (shared by scheduler and executors)
-  scheduler:
-    queues:
-      - name: "fast"
-        index: 0
-        capacity: 1000
-      - name: "bulk"
-        index: 1
-        capacity: 500
-
-  # Adapter configurations - executors reference queue names
+  # TPS-based Hierarchical Executors (each with its own queue)
   adapters:
     executors:
-      - queue_name: "fast"
-        worker_count: 10
-        keep-alive-seconds: 60
-        allow-core-thread-timeout: true
+      # Root executor - overall TPS budget
+      - id: "main"
+        tps: 1000                           # Max 1000 unique requests/sec total
+        queue_capacity: 5000                # Queue for tasks hitting main's TPS limit
+        identifier_field: "$req.requestId"  # Count by request ID
 
-      - queue_name: "bulk"
-        worker_count: 5
-        keep-alive-seconds: 120
-        allow-core-thread-timeout: true
+      # Child executor for fast/VIP traffic
+      - id: "fast"
+        parent: "main"
+        tps: 500                            # Max 500 unique requests/sec for fast
+        queue_capacity: 2000                # Queue for fast executor
+        identifier_field: "$req.requestId"
+
+      # Child executor for bulk traffic  
+      - id: "bulk"
+        parent: "main"
+        tps: 300                            # Max 300 unique requests/sec for bulk
+        queue_capacity: 1000                # Queue for bulk executor
+        identifier_field: "$req.requestId"
 
   # Priority Strategy Configuration
   priority-strategy:
     type: FIFO
 
-  # Priority tree - routes tasks to queues at leaf nodes
+  # Priority tree - routes tasks to executors at leaf nodes
+  # Uses unified syntax: condition is an expression string with nested-levels
   priority-tree:
     # Level 1: Region-based routing
     - name: "L1.NORTH_AMERICA"
-      condition:
-        type: EQUALS
-        field: $req.region
-        value: "NORTH_AMERICA"
+      condition: '$req.region == "NORTH_AMERICA"'
       nested-levels:
         # Level 2: Customer tier
         - name: "L2.PLATINUM"
-          condition:
-            type: EQUALS
-            field: $req.customerTier
-            value: "PLATINUM"
+          condition: '$req.customerTier == "PLATINUM"'
           nested-levels:
             # Level 3: Transaction amount
             - name: "L3.HIGH_VALUE"
-              condition:
-                type: GREATER_THAN
-                field: $req.transactionAmount
-                value: 100000
+              condition: "$req.transactionAmount > 100000"
               sort-by:
                 field: $req.priority
                 direction: DESC
-              queue: "fast"  # Route to fast queue
+              executor: "fast"  # Route to fast executor
 
             - name: "L3.DEFAULT"
-              condition:
-                type: ALWAYS_TRUE
+              condition: "true"
               sort-by:
                 field: $req.urgency
                 direction: DESC
-              queue: "fast"
+              executor: "fast"
 
         - name: "L2.GOLD"
-          condition:
-            type: EQUALS
-            field: $req.customerTier
-            value: "GOLD"
+          condition: '$req.customerTier == "GOLD"'
           nested-levels:
             - name: "L3.DEFAULT"
-              condition:
-                type: ALWAYS_TRUE
+              condition: "true"
               sort-by:
                 field: $sys.submittedAt
                 direction: ASC
-              queue: "fast"
+              executor: "fast"
 
         - name: "L2.DEFAULT"
-          condition:
-            type: ALWAYS_TRUE
+          condition: "true"
           nested-levels:
             - name: "L3.DEFAULT"
-              condition:
-                type: ALWAYS_TRUE
+              condition: "true"
               sort-by:
                 field: $sys.submittedAt
                 direction: ASC
-              queue: "bulk"  # Route to bulk queue
+              executor: "bulk"  # Route to bulk executor
 
     - name: "L1.EUROPE"
-      condition:
-        type: EQUALS
-        field: $req.region
-        value: "EUROPE"
+      condition: '$req.region == "EUROPE"'
       nested-levels:
         - name: "L2.DEFAULT"
-          condition:
-            type: ALWAYS_TRUE
+          condition: "true"
           nested-levels:
             - name: "L3.DEFAULT"
-              condition:
-                type: ALWAYS_TRUE
+              condition: "true"
               sort-by:
                 field: $req.priority
                 direction: DESC
-              queue: "fast"
+              executor: "fast"
 
     # Catch-all for other regions
     - name: "L1.DEFAULT"
-      condition:
-        type: ALWAYS_TRUE
+      condition: "true"
       nested-levels:
         - name: "L2.DEFAULT"
-          condition:
-            type: ALWAYS_TRUE
+          condition: "true"
           nested-levels:
             - name: "L3.DEFAULT"
-              condition:
-                type: ALWAYS_TRUE
+              condition: "true"
               sort-by:
                 field: $sys.submittedAt
                 direction: ASC
-              queue: "bulk"  # Default to bulk queue
+              executor: "bulk"  # Default to bulk executor

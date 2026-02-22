@@ -1,7 +1,7 @@
 package com.pool;
 
-import com.pool.adapter.executor.DefaultPoolExecutor;
 import com.pool.adapter.executor.PoolExecutor;
+import com.pool.adapter.executor.tps.TpsPoolExecutor;
 import com.pool.core.TaskContext;
 import com.pool.core.TaskContextFactory;
 import com.pool.adapter.spring.EnablePool;
@@ -36,8 +36,8 @@ public class PoolApplication {
         return args -> {
             log.info("=== Pool Demo Started ===");
 
-            DefaultPoolExecutor executor = (DefaultPoolExecutor) poolExecutor;
-            log.info("Initial worker count: {}", executor.getWorkerCount());
+            TpsPoolExecutor executor = (TpsPoolExecutor) poolExecutor;
+            log.info("Initial stats: {}", executor.getStats());
 
             // Context (simulating headers/metadata)
             Map<String, String> context = Map.of("clientId", "demo-app");
@@ -60,7 +60,7 @@ public class PoolApplication {
                 }));
             }
 
-            log.info("After submitting 20 tasks, worker count: {}", executor.getWorkerCount());
+            log.info("After submitting 20 tasks, stats: {}", executor.getStats());
 
             // Wait for all tasks to complete
             for (int i = 0; i < futures.size(); i++) {
@@ -68,14 +68,7 @@ public class PoolApplication {
             }
 
             log.info("=== All Tasks Completed ===");
-            log.info("Worker count after tasks: {}", executor.getWorkerCount());
-
-            // Wait for scale-down (keep-alive is 5 seconds in config)
-            log.info("Waiting 7 seconds for excess threads to scale down...");
-            Thread.sleep(7000);
-
-            log.info("Worker count after scale-down: {}", executor.getWorkerCount());
-            log.info("(Should be back to core pool size of 10)");
+            log.info("Stats after tasks: {}", executor.getStats());
 
             // Shutdown the executor and exit (for demo purposes)
             poolExecutor.shutdown();

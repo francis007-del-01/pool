@@ -1,19 +1,20 @@
 # Pool
 
-A policy-driven prioritization library with an optional in-process executor adapter for Java applications.
+A policy-driven prioritization library with TPS-based hierarchical executors for Java applications.
 
 ## What is Pool?
 
-Pool is a **pluggable prioritization engine** that evaluates tasks against a policy tree and orders them by priority. It can be used standalone (via `PriorityScheduler`) or through the optional in-process executor adapter.
+Pool is a **pluggable prioritization engine** that evaluates tasks against a policy tree and orders them by priority. It features **TPS-based rate limiting** with hierarchical executors and unbounded thread pools.
 
-Instead of simple FIFO queues, Pool uses a **priority tree** to dynamically route and order tasks based on request attributes, business rules, and system state.
+Instead of fixed thread pools, Pool uses **TPS limits** as the primary control mechanism, with priority-based queuing when limits are reached.
 
 ## Why Pool?
 
 - **No Code Changes for Priority Logic** - Change prioritization rules via YAML, no redeployment needed
 - **Business-Driven Ordering** - Prioritize by customer tier, transaction amount, region, or any field
-- **Multi-Queue Architecture** - Route tasks to different queues with independent worker pools
-- **Executor Adapter** - Optional in-process thread-pool adapter for drop-in use
+- **TPS-Based Rate Limiting** - Configure throughput limits instead of thread counts
+- **Hierarchical Executors** - Child executors consume from parent's TPS budget
+- **Priority Under Contention** - When TPS limit hit, queued tasks ordered by priority
 - **Framework Agnostic** - Works with Spring Boot, Micronaut, plain Java, or any JVM application
 
 ## Installation
@@ -45,63 +46,51 @@ pool:
   name: "order-processing-pool"
   version: "1.0"
 
-  # Queue definitions (shared by scheduler and executors)
-  scheduler:
-    queues:
-      - name: "fast"
-        index: 0          # Lower index = higher priority when polling
-        capacity: 1000
-      - name: "bulk"
-        index: 1
-        capacity: 500
-
-  # Multiple executors - each references a queue and defines its worker pool
+  # TPS-based hierarchical executors
   adapters:
     executors:
-      - queue_name: "fast"
-        worker_count: 10
-        keep-alive-seconds: 60
-        allow-core-thread-timeout: true
+      # Root executor - defines system capacity
+      - id: "main"
+        tps: 1000              # Max 1000 requests/second
+        queue_capacity: 5000   # Shared queue budget when TPS exceeded
 
-      - queue_name: "bulk"
-        worker_count: 5
-        keep-alive-seconds: 120
-        allow-core-thread-timeout: true
+      # Child executor for VIP customers
+      - id: "vip"
+        parent: "main"
+        tps: 400               # Max 400 TPS (from main's budget)
+
+      # Child executor for bulk processing  
+      - id: "bulk"
+        parent: "main"
+        tps: 200               # Max 200 TPS (from main's budget)
 
   priority-strategy:
     type: FIFO
 
   priority-tree:
-    # Platinum customers → fast queue
+    # Platinum customers → VIP executor
     - name: "PLATINUM"
-      condition:
-        type: EQUALS
-        field: $req.customerTier
-        value: "PLATINUM"
+      condition: '$req.customerTier == "PLATINUM"'
       sort-by:
         field: $req.priority
         direction: DESC
-      queue: "fast"           # Route to fast queue
+      executor: "vip"           # Route to VIP executor
 
-    # High-value transactions → fast queue
+    # High-value transactions → VIP executor
     - name: "HIGH_VALUE"
-      condition:
-        type: GREATER_THAN
-        field: $req.amount
-        value: 100000
+      condition: "$req.amount > 100000"
       sort-by:
         field: $sys.submittedAt
         direction: ASC
-      queue: "fast"
+      executor: "vip"
 
-    # Everything else → bulk queue
+    # Everything else → bulk executor
     - name: "DEFAULT"
-      condition:
-        type: ALWAYS_TRUE
+      condition: "true"
       sort-by:
         field: $sys.submittedAt
         direction: ASC
-      queue: "bulk"           # Route to bulk queue
+      executor: "bulk"           # Route to bulk executor
 ```
 
 ### 2. Initialize the Priority Scheduler (Recommended)
@@ -124,14 +113,10 @@ pool:
   
   priority-tree:
     - name: "HIGH_PRIORITY"
-      condition:
-        type: GREATER_THAN
-        field: $req.priority
-        value: 80
+      condition: "$req.priority > 80"
       queue: "fast"
     - name: "DEFAULT"
-      condition:
-        type: ALWAYS_TRUE
+      condition: "true"
       queue: "bulk"
 ```
 
@@ -166,21 +151,20 @@ MyPayload next = scheduler.getNext();
 MyPayload fastTask = scheduler.getNext("fast");
 ```
 
-### 4. Initialize the In-Process Executor (Adapter)
+### 4. Initialize the TPS-Based Executor
 
 ```java
 import com.pool.config.ConfigLoader;
 import com.pool.config.PoolConfig;
 import com.pool.adapter.executor.PoolExecutor;
-import com.pool.adapter.executor.DefaultPoolExecutor;
+import com.pool.adapter.executor.tps.TpsPoolExecutor;
 
 // Load configuration
 PoolConfig config = ConfigLoader.load("classpath:pool.yaml");
 // Or from file path: ConfigLoader.load("/etc/myapp/pool.yaml");
 
-// Create executor (adapter, uses PriorityScheduler internally)
-// Workers are automatically created per queue based on config
-PoolExecutor executor = new DefaultPoolExecutor(config);
+// Create TPS-based executor with hierarchical rate limiting
+PoolExecutor executor = new TpsPoolExecutor(config);
 ```
 
 ### 5. Submit Tasks (Adapter)
@@ -283,18 +267,23 @@ Selects which condition syntax is allowed in the priority tree:
 - `CONDITION_EXPR` mode: Nodes must use `condition-expr:` (string) and cannot have `nested-levels`
 - Mixing syntaxes within a single config is not allowed
 
-### Multi-Queue Executor Configuration
+### TPS-Based Executor Configuration
 
 Path: `pool.adapters.executors[]`
 
-Each executor references a queue by name and defines its worker pool:
+Each executor defines a TPS limit and optional parent:
 
 | Property | Default | Description |
 |----------|---------|-------------|
-| `queue_name` | required | Target queue name (must exist in `scheduler.queues`) |
-| `worker_count` | 10 | Fixed number of worker threads for this queue |
-| `keep-alive-seconds` | 60 | Idle timeout before workers can terminate |
-| `allow-core-thread-timeout` | true | Allow workers to time out when idle |
+| `id` | required | Unique executor identifier |
+| `parent` | null | Parent executor ID (null for root) |
+| `tps` | 0 | Max TPS limit (0 = unbounded) |
+| `queue_capacity` | 0 | Max queue size when TPS exceeded (only for root) |
+
+**Hierarchical TPS:**
+- Child executors consume from parent's TPS budget
+- If parent at limit, child requests are queued
+- Child TPS cannot exceed parent TPS
 
 ### Queue Configuration (Scheduler)
 
@@ -319,15 +308,11 @@ pool:
   
   priority-tree:
     - name: "HIGH_PRIORITY"
-      condition:
-        type: EQUALS
-        field: $req.priority
-        value: "HIGH"
+      condition: '$req.priority == "HIGH"'
       queue: "fast"
     
     - name: "DEFAULT"
-      condition:
-        type: ALWAYS_TRUE
+      condition: "true"
       queue: "bulk"
 ```
 
@@ -349,16 +334,10 @@ The priority tree is evaluated top-to-bottom. First matching node wins. Leaf nod
 ```yaml
 priority-tree:
   - name: "NODE_NAME"
-    condition:
-      type: EQUALS
-      field: $req.region
-      value: "US"
+    condition: '$req.region == "US"'
     nested-levels:
       - name: "NESTED_NODE"
-        condition:
-          type: GREATER_THAN
-          field: $req.amount
-          value: 10000
+        condition: "$req.amount > 10000"
         sort-by:
           field: $req.priority
           direction: DESC
@@ -367,13 +346,14 @@ priority-tree:
 
 ---
 
-## Multi-Queue Architecture
+## TPS-Based Hierarchical Executor
 
-Pool supports **multiple queues**, each with its own worker pool. This enables:
+Pool uses **TPS (Transactions Per Second)** as the primary rate control mechanism with hierarchical executors:
 
-- **Workload Isolation** - High-priority tasks get dedicated workers
-- **Resource Control** - Different thread pool sizes per queue
-- **Queue-Based Routing** - Policy tree routes tasks to specific queues
+- **TPS Limits** - Configure throughput instead of thread counts
+- **Hierarchical Executors** - Child executors share parent's TPS budget
+- **Sliding Window** - 1-second window for accurate TPS tracking
+- **Priority Queuing** - When TPS exceeded, tasks queued by priority
 
 ### How It Works
 
@@ -386,86 +366,78 @@ Pool supports **multiple queues**, each with its own worker pool. This enables:
 │         ▼                                                               │
 │   ┌─────────────────┐                                                   │
 │   │  Policy Engine  │  Evaluates priority tree                          │
-│   │                 │  Determines: priority key + target queue          │
+│   │                 │  Determines: priority key + target executor       │
 │   └────────┬────────┘                                                   │
 │            │                                                            │
-│            │  returns queue name                                        │
+│            │  returns executor ID                                       │
 │            ▼                                                            │
 │   ┌─────────────────────────────────────────────────────────────────┐   │
-│   │                   Priority Scheduler                            │   │
-│   │   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │   │
-│   │   │ Queue: fast  │    │ Queue: bulk  │    │ Queue: ...   │      │   │
-│   │   │ index: 0     │    │ index: 1     │    │ index: N     │      │   │
-│   │   │ capacity:1000│    │ capacity:500 │    │              │      │   │
-│   │   └──────┬───────┘    └──────┬───────┘    └──────┬───────┘      │   │
-│   └──────────│───────────────────│───────────────────│──────────────┘   │
-│              │                   │                   │                  │
-│              ▼                   ▼                   ▼                  │
-│   ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐        │
-│   │ Workers (fast)   │ │ Workers (bulk)   │ │ Workers (...)    │        │
-│   │ count: 10        │ │ count: 5         │ │                  │        │
-│   │                 │ │                  │ │                  │        │
-│   │                  │ │                  │ │                  │        │
-│   │ getNext("fast")  │ │ getNext("bulk")  │ │                  │        │
-│   └──────────────────┘ └──────────────────┘ └──────────────────┘        │
+│   │                      TPS Gate                                   │   │
+│   │   • Check executor TPS limit                                    │   │
+│   │   • Check all ancestor TPS limits                               │   │
+│   │   • Track unique request IDs in sliding window                  │   │
+│   └────────┬────────────────────────────────────────────────────────┘   │
+│            │                                                            │
+│     ┌──────┴──────┐                                                     │
+│     │             │                                                     │
+│  TPS OK      TPS Exceeded                                               │
+│     │             │                                                     │
+│     ▼             ▼                                                     │
+│  ┌───────┐   ┌─────────────────────────────────────────┐                │
+│  │Execute│   │  Per-Executor Priority Queue            │                │
+│  │  Now  │   │  • Ordered by priority vector           │                │
+│  └───────┘   │  • Drainer pulls when TPS frees up      │                │
+│              └─────────────────────────────────────────┘                │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Key Concepts
 
-1. **Queue Routing**: Leaf nodes in the priority tree specify a `queue` field. Tasks matching that path are routed to that queue.
+1. **Executor Routing**: Leaf nodes in the priority tree specify an `executor` field. Tasks are routed to that executor's TPS gate.
 
-2. **Per-Queue Workers**: Each queue has its own fixed `worker_count`.
+2. **Hierarchical TPS**: Child executors consume from parent's budget:
+   ```
+   main (1000 TPS)
+   ├── vip (400 TPS)    # Can use up to 400 of main's 1000
+   └── bulk (200 TPS)   # Can use up to 200 of main's 1000
+   ```
 
-3. **Queue Priority**: Queues have an `index` field. When calling `getNext()` without a queue name, queues are checked in index order (lowest first).
+3. **Unbounded Threads**: Threads spawn as needed when TPS allows - no fixed pool size.
 
-4. **Bounded Queues**: Each queue has a `capacity`. When full, submissions are rejected with `TaskRejectedException`.
+4. **Priority Queuing**: When TPS exceeded, tasks queue ordered by priority vector.
 
-### Example: Fast vs Bulk Processing
+### Example: VIP vs Bulk Processing
 
 ```yaml
-scheduler:
-  queues:
-    - name: "fast"
-      index: 0
-      capacity: 1000
-    - name: "bulk"
-      index: 1
-      capacity: 500
-
 adapters:
   executors:
-    # Fast queue: High priority, more workers, quick turnaround
-    - queue_name: "fast"
-      worker_count: 10
-      keep-alive-seconds: 60
-      allow-core-thread-timeout: true
+    # Root executor: System capacity
+    - id: "main"
+      tps: 1000
+      queue_capacity: 5000
 
-    # Bulk queue: Lower priority, fewer workers, batch processing
-    - queue_name: "bulk"
-      worker_count: 5
-      keep-alive-seconds: 120
-      allow-core-thread-timeout: true
+    # VIP executor: Premium customers
+    - id: "vip"
+      parent: "main"
+      tps: 400
+
+    # Bulk executor: Background processing
+    - id: "bulk"
+      parent: "main"
+      tps: 200
 
 priority-tree:
   - name: "PLATINUM_CUSTOMERS"
-    condition:
-      type: EQUALS
-      field: $req.tier
-      value: "PLATINUM"
-    queue: "fast"           # VIPs go to fast queue
+    condition: '$req.tier == "PLATINUM"'
+    executor: "vip"           # VIPs get dedicated TPS budget
 
   - name: "HIGH_VALUE"
-    condition:
-      type: GREATER_THAN
-      field: $req.amount
-      value: 50000
-    queue: "fast"           # High-value goes to fast queue
+    condition: "$req.amount > 50000"
+    executor: "vip"           # High-value gets VIP treatment
 
   - name: "DEFAULT"
-    condition:
-      type: ALWAYS_TRUE
-    queue: "bulk"           # Everything else goes to bulk queue
+    condition: "true"
+    executor: "bulk"          # Everything else to bulk
 ```
 
 ---
@@ -496,22 +468,13 @@ When a task is submitted, Pool traverses the tree to find the **first matching p
 ```yaml
 priority-tree:
   - name: "L1.NORTH_AMERICA"        # Index 1 at Level 1
-    condition:
-      type: EQUALS
-      field: $req.region
-      value: "NORTH_AMERICA"
+    condition: '$req.region == "NORTH_AMERICA"'
     nested-levels:
       - name: "L2.PLATINUM"         # Index 1 at Level 2
-        condition:
-          type: EQUALS
-          field: $req.customerTier
-          value: "PLATINUM"
+        condition: '$req.customerTier == "PLATINUM"'
         nested-levels:
           - name: "L3.HIGH_VALUE"   # Index 1 at Level 3
-            condition:
-              type: GREATER_THAN
-              field: $req.amount
-              value: 100000
+            condition: "$req.amount > 100000"
             sort-by:
               field: $req.priority
               direction: DESC
@@ -558,10 +521,7 @@ When multiple tasks have the **same path vector** (same bucket), they're ordered
 
 ```yaml
 - name: "L3.HIGH_VALUE"
-  condition:
-    type: GREATER_THAN
-    field: $req.amount
-    value: 100000
+  condition: "$req.amount > 100000"
   sort-by:
     field: $req.priority    # Sort by this field within this bucket
     direction: DESC         # Higher priority values first
@@ -721,44 +681,40 @@ Access as: `$req.customer.tier`, `$req.customer.id`
 
 ### Comparison
 ```yaml
-type: EQUALS | NOT_EQUALS | GREATER_THAN | LESS_THAN | BETWEEN
-field: $req.amount
-value: 1000
-value2: 5000  # Only for BETWEEN
+condition: "$req.amount == 1000"      # EQUALS
+condition: "$req.amount != 1000"      # NOT_EQUALS  
+condition: "$req.amount > 1000"       # GREATER_THAN
+condition: "$req.amount < 1000"       # LESS_THAN
+condition: "$req.amount >= 1000"      # GREATER_THAN_OR_EQUALS
+condition: "$req.amount <= 1000"      # LESS_THAN_OR_EQUALS
 ```
 
 ### Collection
 ```yaml
-type: IN | NOT_IN
-field: $req.region
-values: ["US", "CA", "MX"]
+condition: '$req.region IN ["US", "CA", "MX"]'
+condition: '$req.region NOT IN ["EU", "ASIA"]'
 ```
 
 ### String
 ```yaml
-type: REGEX | STARTS_WITH | ENDS_WITH
-field: $req.email
-pattern: ".*@company\\.com"  # For REGEX
-value: "@company.com"         # For ENDS_WITH
+condition: '$req.email REGEX ".*@company\\.com"'
+condition: '$req.email STARTS_WITH "admin"'
+condition: '$req.email ENDS_WITH "@company.com"'
+condition: '$req.name CONTAINS "Corp"'
 ```
 
 ### Logical (Combine Conditions)
 ```yaml
-type: AND | OR
-conditions:
-  - type: EQUALS
-    field: $req.tier
-    value: "PLATINUM"
-  - type: GREATER_THAN
-    field: $req.amount
-    value: 10000
+condition: '$req.tier == "PLATINUM" AND $req.amount > 10000'
+condition: '$req.tier == "VIP" OR $req.amount > 50000'
+condition: 'NOT ($req.status == "CANCELLED")'
 ```
 
 ### Special
 ```yaml
-type: ALWAYS_TRUE  # Catch-all, always matches
-type: EXISTS       # Field exists
-type: IS_NULL      # Field is null/missing
+condition: "true"                     # Catch-all, always matches
+condition: "EXISTS($req.email)"       # Field exists
+condition: "IS_NULL($req.email)"      # Field is null/missing
 ```
 
 ## Condition Expressions (Flat)
@@ -832,35 +788,27 @@ ConditionConfig config = ConditionExpressionParser.parse(expr);
 
 The same rule can be expressed in both modes:
 
-**CONDITION_TREE Mode (Hierarchical):**
+**Expression Syntax (Recommended):**
 ```yaml
-syntax-used: CONDITION_TREE
 priority-tree:
   - name: "VIP_OR_HIGH_VALUE"
-    condition:
-      type: OR
-      conditions:
-        - type: EQUALS
-          field: $req.tier
-          value: "PLATINUM"
-        - type: GREATER_THAN
-          field: $req.amount
-          value: 50000
+    condition: '$req.tier == "PLATINUM" OR $req.amount > 50000'
     queue: "fast"
 ```
 
-**CONDITION_EXPR Mode (Flat):**
+**With Nested Levels:**
 ```yaml
-syntax-used: CONDITION_EXPR
 priority-tree:
-  - name: "VIP_OR_HIGH_VALUE"
-    condition-expr: 'tier == "PLATINUM" OR amount > 50000'
-    queue: "fast"
+  - name: "VIP_CUSTOMERS"
+    condition: '$req.tier == "PLATINUM"'
+    nested-levels:
+      - name: "HIGH_VALUE"
+        condition: "$req.amount > 50000"
+        queue: "fast"
+      - name: "DEFAULT"
+        condition: "true"
+        queue: "standard"
 ```
-
-Both produce the same `ConditionConfig` tree and evaluate identically. Choose based on complexity:
-- Simple, flat rules → `CONDITION_EXPR` (more readable)
-- Complex nested hierarchies → `CONDITION_TREE` (more structured)
 
 ## Example: E-Commerce Order Processing
 
@@ -903,15 +851,7 @@ pool:
   priority-tree:
     # VIP customers with large orders → fast
     - name: "VIP_LARGE"
-      condition:
-        type: AND
-        conditions:
-          - type: IN
-            field: $req.customer.tier
-            values: ["PLATINUM", "GOLD"]
-          - type: GREATER_THAN
-            field: $req.order.total
-            value: 5000
+      condition: '$req.customer.tier IN ["PLATINUM", "GOLD"] AND $req.order.total > 5000'
       sort-by:
         field: $req.order.total
         direction: DESC
@@ -919,10 +859,7 @@ pool:
 
     # Express shipping → fast
     - name: "EXPRESS"
-      condition:
-        type: EQUALS
-        field: $req.shipping.type
-        value: "EXPRESS"
+      condition: '$req.shipping.type == "EXPRESS"'
       sort-by:
         field: $sys.submittedAt
         direction: ASC
@@ -930,10 +867,7 @@ pool:
 
     # Standard orders → standard
     - name: "STANDARD"
-      condition:
-        type: EQUALS
-        field: $req.shipping.type
-        value: "STANDARD"
+      condition: '$req.shipping.type == "STANDARD"'
       sort-by:
         field: $sys.submittedAt
         direction: ASC
@@ -941,8 +875,7 @@ pool:
 
     # Everything else → bulk
     - name: "DEFAULT"
-      condition:
-        type: ALWAYS_TRUE
+      condition: "true"
       sort-by:
         field: $sys.submittedAt
         direction: ASC
@@ -1028,6 +961,94 @@ while (true) {
             event
     );
     kafkaProducer.send(record);
+}
+```
+
+## Testing
+
+Pool includes comprehensive unit tests covering all major functionality.
+
+### Running Tests
+
+```bash
+# Run all tests
+mvn test
+
+# Run specific test class
+mvn test -Dtest=PoolApplicationTest
+
+# Run with verbose output
+mvn test -Dtest=PoolApplicationTest -X
+```
+
+### Test Coverage
+
+| Test Class | Coverage |
+|------------|----------|
+| `PoolApplicationTest` | End-to-end pool functionality, routing, and task execution |
+| `TpsPoolExecutorTest` | TPS-based executor, submission, and lifecycle |
+| `TpsGateTest` | TPS rate limiting and sliding window |
+| `ExecutorHierarchyTest` | Hierarchical executor relationships |
+| `SlidingWindowCounterTest` | Sliding window counter accuracy |
+
+### PoolApplicationTest Scenarios
+
+The main test class validates all routing scenarios from `pool.yaml`:
+
+**Region Routing:**
+- `NORTH_AMERICA` + `PLATINUM` → `fast` executor
+- `NORTH_AMERICA` + `GOLD` → `fast` executor
+- `NORTH_AMERICA` + default tier → `bulk` executor
+- `EUROPE` → `fast` executor
+- Unknown regions → `bulk` executor (default)
+
+**Customer Tier Routing:**
+- `PLATINUM` with high-value transactions (>100k) → `fast`
+- `PLATINUM` with low-value transactions → `fast`
+- `GOLD` → `fast`
+- `SILVER`, `STANDARD` → `bulk`
+
+**Task Execution:**
+- Callable and Runnable task submission
+- Concurrent multi-region task submission
+- Mixed-tier concurrent workloads
+- Statistics tracking (submitted, executed, rejected)
+
+**Error Handling:**
+- Null context rejection
+- Null task rejection
+- Post-shutdown task rejection
+
+**Lifecycle:**
+- Graceful shutdown
+- Immediate shutdown
+- Await termination
+
+### Writing New Tests
+
+```java
+@Test
+void myCustomRoutingTest() {
+    // Create context with JSON payload
+    String json = """
+        {
+            "region": "NORTH_AMERICA",
+            "customerTier": "PLATINUM",
+            "transactionAmount": 150000
+        }
+        """;
+    TaskContext ctx = TaskContextFactory.create(json, Map.of());
+    
+    // Evaluate routing
+    EvaluationResult result = policyEngine.evaluate(ctx);
+    
+    // Verify executor assignment
+    assertEquals("fast", result.getMatchedPath().executor());
+    
+    // Verify path traversal
+    String path = result.getMatchedPath().toPathString();
+    assertTrue(path.contains("L1.NORTH_AMERICA"));
+    assertTrue(path.contains("L2.PLATINUM"));
 }
 ```
 

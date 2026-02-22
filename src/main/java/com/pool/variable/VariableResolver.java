@@ -47,4 +47,17 @@ public interface VariableResolver {
      * @return Double value, or empty if not found or not numeric
      */
     Optional<Double> resolveAsDouble(String reference, TaskContext context);
+
+    /**
+     * Resolve a variable as a String value.
+     *
+     * @param reference Variable reference
+     * @param context   Task context
+     * @return String value, or null if not found
+     */
+    default String resolveAsString(String reference, TaskContext context) {
+        return resolve(reference, context)
+                .map(Object::toString)
+                .orElse(null);
+    }
 }

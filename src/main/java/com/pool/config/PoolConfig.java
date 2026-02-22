@@ -10,40 +10,46 @@ import java.util.stream.Collectors;
  *
  * @param name              Pool name identifier
  * @param version           Configuration version
- * @param executors         Executor specifications (each targets a queue by name)
- * @param scheduler         Priority scheduler configuration
+ * @param executors         Executor specifications (each with its own queue)
  * @param priorityTree      Priority tree configuration (list of root nodes)
- * @param syntaxUsed        Condition syntax to use (tree or expression)
  * @param priorityStrategy  Priority strategy configuration (FIFO, TIME_BASED, etc.)
  */
 public record PoolConfig(
         String name,
         String version,
         List<ExecutorSpec> executors,
-        SchedulerConfig scheduler,
         List<PriorityNodeConfig> priorityTree,
-        SyntaxUsed syntaxUsed,
         StrategyConfig priorityStrategy
 ) {
     /**
-     * Get executor spec by queue name.
+     * Get executor spec by ID.
      */
-    public ExecutorSpec getExecutorByQueue(String queueName) {
+    public ExecutorSpec getExecutorById(String executorId) {
         return executors.stream()
-                .filter(e -> e.queueName().equals(queueName))
+                .filter(e -> e.id().equals(executorId))
                 .findFirst()
                 .orElse(null);
     }
 
     /**
-     * Get map of queue name to executor spec.
+     * Get map of executor ID to executor spec.
      */
-    public Map<String, ExecutorSpec> executorsByQueue() {
+    public Map<String, ExecutorSpec> executorsById() {
         return executors.stream()
                 .collect(Collectors.toMap(
-                        ExecutorSpec::queueName,
+                        ExecutorSpec::id,
                         Function.identity()
                 ));
+    }
+
+    /**
+     * Get root executor (executor without parent).
+     */
+    public ExecutorSpec getRootExecutor() {
+        return executors.stream()
+                .filter(ExecutorSpec::isRoot)
+                .findFirst()
+                .orElse(null);
     }
 
     /**
@@ -53,16 +59,14 @@ public record PoolConfig(
         return new PoolConfig(
                 "test-pool",
                 "1.0",
-                List.of(ExecutorSpec.defaults("default")),
-                SchedulerConfig.minimal(),
+                List.of(ExecutorSpec.root("main", 1000, 5000)),
                 List.of(new PriorityNodeConfig(
                         "DEFAULT",
-                        ConditionConfig.alwaysTrue(),
+                        "true",
                         null,
                         SortByConfig.fifo(),
-                        "default"
+                        "main"
                 )),
-                SyntaxUsed.CONDITION_TREE,
                 StrategyConfig.fifo()
         );
     }

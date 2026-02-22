@@ -1,6 +1,5 @@
 package com.pool.config;
 
-import com.pool.condition.ConditionType;
 import com.pool.exception.ConfigurationException;
 import com.pool.strategy.StrategyType;
 import org.slf4j.Logger;
@@ -67,19 +66,13 @@ public class ConfigLoader {
 
         String name = getString(poolConfig, "name", "default-pool");
         String version = getString(poolConfig, "version", "1.0");
-        SyntaxUsed syntaxUsed = parseSyntaxUsed(poolConfig);
         
-        // Parse adapters.executors - each executor targets a named queue
+        // Parse adapters.executors - each executor has its own queue
         Map<String, Object> adaptersConfig = (Map<String, Object>) poolConfig.get("adapters");
         List<ExecutorSpec> executorSpecs = parseExecutorSpecs(adaptersConfig);
         
-        // Parse scheduler config (queues are defined here)
-        Map<String, Object> schedulerMap = (Map<String, Object>) poolConfig.get("scheduler");
-        SchedulerConfig scheduler = parseSchedulerConfig(schedulerMap);
-        
         List<PriorityNodeConfig> priorityTree = parsePriorityTree(
-                (List<Map<String, Object>>) poolConfig.get("priority-tree"),
-                syntaxUsed);
+                (List<Map<String, Object>>) poolConfig.get("priority-tree"));
 
         StrategyConfig strategyConfig = parseStrategyConfig(
                 (Map<String, Object>) poolConfig.get("priority-strategy"));
@@ -87,34 +80,23 @@ public class ConfigLoader {
         // Validate configuration
         if (priorityTree == null || priorityTree.isEmpty()) {
             log.warn("No priority-tree configured, using default catch-all");
-            String defaultQueue = scheduler.queues().isEmpty() ? "default" : scheduler.queues().get(0).name();
             priorityTree = List.of(new PriorityNodeConfig(
                     "DEFAULT",
-                    ConditionConfig.alwaysTrue(),
+                    "true",  // always true expression
                     null,
                     SortByConfig.fifo(),
-                    defaultQueue
+                    "main"  // default executor
             ));
         }
 
-        // Validate executor -> queue mapping
-        if (executorSpecs != null && !executorSpecs.isEmpty()) {
-            for (ExecutorSpec spec : executorSpecs) {
-                QueueConfig queue = scheduler.getQueue(spec.queueName());
-                if (queue == null) {
-                    throw new ConfigurationException(
-                            "Executor targets unknown queue '" + spec.queueName()
-                                    + "'. Define it under scheduler.queues.");
-                }
-            }
-        }
+        // Validate executor hierarchy (done in ExecutorHierarchy constructor)
 
         PoolConfig config = new PoolConfig(
-                name, version, executorSpecs, scheduler, priorityTree, syntaxUsed, strategyConfig);
+                name, version, executorSpecs, priorityTree, strategyConfig);
         
-        log.info("Loaded Pool configuration: {} v{} with {} executors, {} queues, {} root nodes, syntax: {}, strategy: {}",
-                name, version, executorSpecs.size(), scheduler.queues().size(), priorityTree.size(),
-                syntaxUsed, strategyConfig != null ? strategyConfig.type() : "FIFO (default)");
+        log.info("Loaded Pool configuration: {} v{} with {} executors, {} root nodes, strategy: {}",
+                name, version, executorSpecs.size(), priorityTree.size(),
+                strategyConfig != null ? strategyConfig.type() : "FIFO (default)");
         
         return config;
     }
@@ -135,170 +117,75 @@ public class ConfigLoader {
         for (int i = 0; i < executorsList.size(); i++) {
             Map<String, Object> execMap = executorsList.get(i);
             
-            // Parse queue name (queue_name preferred)
-            String queueName = getString(execMap, "queue_name", null);
-            if (queueName == null || queueName.isBlank()) {
-                queueName = getString(execMap, "queue-name", null);
+            // Parse executor ID (required)
+            String id = getString(execMap, "id", null);
+            if (id == null || id.isBlank()) {
+                id = "executor-" + i;
             }
-            if (queueName == null || queueName.isBlank()) {
-                Object queueObj = execMap.get("queue");
-                if (queueObj != null) {
-                    queueName = queueObj.toString();
-                }
+            
+            // Parse parent (null for root)
+            String parent = getString(execMap, "parent", null);
+            
+            // Parse TPS limit (0 = unbounded)
+            int tps = getInt(execMap, "tps", 0);
+            
+            // Parse queue capacity (only for root executor)
+            int queueCapacity = getInt(execMap, "queue_capacity", 0);
+            if (queueCapacity == 0) {
+                queueCapacity = getInt(execMap, "queue-capacity", 0);
             }
-            if (queueName == null || queueName.isBlank()) {
-                queueName = "queue-" + i;
+            
+            // Parse identifier field for TPS counting (e.g., "$req.ipAddress")
+            String identifierField = getString(execMap, "identifier_field", null);
+            if (identifierField == null || identifierField.isBlank()) {
+                identifierField = getString(execMap, "identifier-field", null);
             }
 
-            int workerCount = getInt(execMap, "worker_count", 10);
-            if (workerCount <= 0) {
-                throw new ConfigurationException("Executor worker_count must be > 0 for queue: " + queueName);
-            }
-            int keepAliveSeconds = getInt(execMap, "keep-alive-seconds", 60);
-            boolean allowCoreThreadTimeout = getBoolean(execMap, "allow-core-thread-timeout", true);
+            specs.add(new ExecutorSpec(id, parent, tps, queueCapacity, identifierField));
 
-            specs.add(new ExecutorSpec(queueName, workerCount, keepAliveSeconds, allowCoreThreadTimeout));
-
-            log.debug("Parsed executor spec: queueName={}, workerCount={}, keepAlive={}, allowTimeout={}",
-                    queueName, workerCount, keepAliveSeconds, allowCoreThreadTimeout);
+            log.debug("Parsed executor spec: id={}, parent={}, tps={}, queueCapacity={}, identifierField={}",
+                    id, parent, tps, queueCapacity, identifierField);
         }
         
         return specs;
     }
 
-    /**
-     * Parse scheduler config.
-     * Queues can come from:
-     * 1. adapters.executors (each executor has a queue) - for executor adapter use
-     * 2. scheduler.queues - for standalone scheduler use (no adapter)
-     * If both are present, executor queues take precedence.
-     */
-    @SuppressWarnings("unchecked")
-    private static SchedulerConfig parseSchedulerConfig(Map<String, Object> schedulerMap) {
-        if (schedulerMap == null) {
-            return SchedulerConfig.defaults();
-        }
-        
-        // Check for queues list
-        List<Map<String, Object>> queuesList = (List<Map<String, Object>>) schedulerMap.get("queues");
-        if (queuesList != null && !queuesList.isEmpty()) {
-            List<QueueConfig> queues = new ArrayList<>();
-            for (int i = 0; i < queuesList.size(); i++) {
-                Map<String, Object> queueMap = queuesList.get(i);
-                String name = getString(queueMap, "name", "queue-" + i);
-                int index = getInt(queueMap, "index", i);
-                int capacity = getInt(queueMap, "capacity", 1000);
-                queues.add(new QueueConfig(name, index, capacity));
-                log.debug("Parsed scheduler queue: name={}, index={}, capacity={}", name, index, capacity);
-            }
-            return new SchedulerConfig(queues);
-        }
-        
-        // Fallback: single queue with queue-capacity
-        int queueCapacity = getInt(schedulerMap, "queue-capacity", 1000);
-        return new SchedulerConfig(List.of(new QueueConfig("default", 0, queueCapacity)));
-    }
-
-    @SuppressWarnings("unchecked")
-    private static List<PriorityNodeConfig> parsePriorityTree(List<Map<String, Object>> list,
-                                                              SyntaxUsed syntaxUsed) {
+    private static List<PriorityNodeConfig> parsePriorityTree(List<Map<String, Object>> list) {
         if (list == null) {
             return List.of();
         }
         List<PriorityNodeConfig> nodes = new ArrayList<>();
         for (Map<String, Object> item : list) {
-            nodes.add(parsePriorityNode(item, syntaxUsed));
+            nodes.add(parsePriorityNode(item));
         }
         return nodes;
     }
 
     @SuppressWarnings("unchecked")
-    private static PriorityNodeConfig parsePriorityNode(Map<String, Object> map, SyntaxUsed syntaxUsed) {
+    private static PriorityNodeConfig parsePriorityNode(Map<String, Object> map) {
         String name = getString(map, "name", "unnamed");
-        ConditionConfig condition = parseConditionBySyntax(map, name, syntaxUsed);
+        String condition = parseConditionExpression(map);
         
         List<PriorityNodeConfig> nestedLevels = null;
         List<Map<String, Object>> nestedList = (List<Map<String, Object>>) map.get("nested-levels");
         if (nestedList != null && !nestedList.isEmpty()) {
-            if (syntaxUsed == SyntaxUsed.CONDITION_EXPR) {
-                throw new ConfigurationException("Priority node '" + name
-                        + "' has nested-levels but syntax-used is CONDITION_EXPR. "
-                        + "Expression mode uses flat sequential evaluation - remove nested-levels.");
-            }
-            nestedLevels = parsePriorityTree(nestedList, syntaxUsed);
+            nestedLevels = parsePriorityTree(nestedList);
         }
         
         SortByConfig sortBy = parseSortBy((Map<String, Object>) map.get("sort-by"));
-        String queue = getString(map, "queue", null);
-        
-        return new PriorityNodeConfig(name, condition, nestedLevels, sortBy, queue);
+        String executor = getString(map, "executor", null);
+        return new PriorityNodeConfig(name, condition, nestedLevels, sortBy, executor);
     }
 
-    @SuppressWarnings("unchecked")
-    private static ConditionConfig parseConditionBySyntax(Map<String, Object> map,
-                                                          String nodeName,
-                                                          SyntaxUsed syntaxUsed) {
-        String conditionExpr = getString(map, "condition-expr", null);
-        if (conditionExpr == null) {
-            conditionExpr = getString(map, "conditionExpr", null);
+    /**
+     * Parse condition expression - expects a string expression.
+     */
+    private static String parseConditionExpression(Map<String, Object> map) {
+        Object conditionObj = map.get("condition");
+        if (conditionObj instanceof String conditionStr) {
+            return conditionStr;
         }
-        Map<String, Object> conditionMap = (Map<String, Object>) map.get("condition");
-
-        if (syntaxUsed == SyntaxUsed.CONDITION_TREE) {
-            if (conditionExpr != null) {
-                throw new ConfigurationException("Priority node '" + nodeName
-                        + "' uses condition-expr but syntax-used is CONDITION_TREE");
-            }
-            return parseCondition(conditionMap);
-        }
-
-        if (syntaxUsed == SyntaxUsed.CONDITION_EXPR) {
-            if (conditionMap != null) {
-                throw new ConfigurationException("Priority node '" + nodeName
-                        + "' uses condition but syntax-used is CONDITION_EXPR");
-            }
-            return ConditionExpressionParser.parse(conditionExpr);
-        }
-
-        return ConditionConfig.alwaysTrue();
-    }
-
-    private static SyntaxUsed parseSyntaxUsed(Map<String, Object> poolConfig) {
-        String syntax = getString(poolConfig, "syntax-used", null);
-        if (syntax == null) {
-            syntax = getString(poolConfig, "syntaxUsed", null);
-        }
-        if (syntax == null || syntax.isBlank()) {
-            return SyntaxUsed.CONDITION_TREE;
-        }
-        return SyntaxUsed.valueOf(syntax.toUpperCase().replace("-", "_"));
-    }
-
-    @SuppressWarnings("unchecked")
-    private static ConditionConfig parseCondition(Map<String, Object> map) {
-        if (map == null) {
-            return ConditionConfig.alwaysTrue();
-        }
-        
-        String typeStr = getString(map, "type", "ALWAYS_TRUE");
-        ConditionType type = ConditionType.valueOf(typeStr.toUpperCase().replace("-", "_"));
-        
-        String field = getString(map, "field", null);
-        Object value = map.get("value");
-        Object value2 = map.get("value2");
-        List<Object> values = (List<Object>) map.get("values");
-        String pattern = getString(map, "pattern", null);
-        
-        List<ConditionConfig> nestedConditions = null;
-        List<Map<String, Object>> conditionsList = (List<Map<String, Object>>) map.get("conditions");
-        if (conditionsList != null) {
-            nestedConditions = new ArrayList<>();
-            for (Map<String, Object> c : conditionsList) {
-                nestedConditions.add(parseCondition(c));
-            }
-        }
-        
-        return new ConditionConfig(type, field, value, value2, values, pattern, nestedConditions);
+        return "true"; // Default: always true
     }
 
     private static SortByConfig parseSortBy(Map<String, Object> map) {
