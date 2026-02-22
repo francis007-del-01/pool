@@ -59,12 +59,14 @@ pool:
       - id: "vip"
         parent: "main"
         tps: 400               # Max 400 TPS (from main's budget)
+        queue_capacity: 2000   # Queue for VIP executor
         identifier_field: "$req.requestId"  # Count by request ID
 
       # Child executor for bulk processing  
       - id: "bulk"
         parent: "main"
         tps: 200               # Max 200 TPS (from main's budget)
+        queue_capacity: 1000   # Queue for bulk executor
         identifier_field: "$req.requestId"  # Count by request ID
 
   priority-strategy:
@@ -281,7 +283,8 @@ Each executor defines a TPS limit and optional parent:
 | `id` | required | Unique executor identifier |
 | `parent` | null | Parent executor ID (null for root) |
 | `tps` | 0 | Max TPS limit (0 = unbounded) |
-| `queue_capacity` | 0 | Max queue size when TPS exceeded (only for root) |
+| `queue_capacity` | 0 | Max queue size when TPS exceeded |
+| `identifier_field` | null | Field to extract unique request ID for TPS counting (e.g., `$req.requestId`) |
 
 **Hierarchical TPS:**
 - Child executors consume from parent's TPS budget
@@ -344,7 +347,7 @@ priority-tree:
         sort-by:
           field: $req.priority
           direction: DESC
-        queue: "fast"         # Route matching tasks to "fast" queue
+        executor: "fast"      # Route matching tasks to "fast" executor
 ```
 
 ---
@@ -400,9 +403,9 @@ Pool uses **TPS (Transactions Per Second)** as the primary rate control mechanis
 
 2. **Hierarchical TPS**: Child executors consume from parent's budget:
    ```
-   main (1000 TPS)
-   ├── vip (400 TPS)    # Can use up to 400 of main's 1000
-   └── bulk (200 TPS)   # Can use up to 200 of main's 1000
+   main (1000 TPS, queue: 5000)
+   ├── vip (400 TPS, queue: 2000)    # Can use up to 400 of main's 1000
+   └── bulk (200 TPS, queue: 1000)   # Can use up to 200 of main's 1000
    ```
 
 3. **Unbounded Threads**: Threads spawn as needed when TPS allows - no fixed pool size.
@@ -418,16 +421,21 @@ adapters:
     - id: "main"
       tps: 1000
       queue_capacity: 5000
+      identifier_field: "$req.requestId"
 
     # VIP executor: Premium customers
     - id: "vip"
       parent: "main"
       tps: 400
+      queue_capacity: 2000
+      identifier_field: "$req.requestId"
 
     # Bulk executor: Background processing
     - id: "bulk"
       parent: "main"
       tps: 200
+      queue_capacity: 1000
+      identifier_field: "$req.requestId"
 
 priority-tree:
   - name: "PLATINUM_CUSTOMERS"
@@ -481,7 +489,7 @@ priority-tree:
             sort-by:
               field: $req.priority
               direction: DESC
-            queue: "fast"
+            executor: "fast"
 ```
 
 **Example**: A task with `{region: "NORTH_AMERICA", customerTier: "PLATINUM", amount: 500000}` would match:
@@ -528,7 +536,7 @@ When multiple tasks have the **same path vector** (same bucket), they're ordered
   sort-by:
     field: $req.priority    # Sort by this field within this bucket
     direction: DESC         # Higher priority values first
-  queue: "fast"
+  executor: "fast"
 ```
 
 ### Complete Priority Calculation
@@ -796,7 +804,7 @@ The same rule can be expressed in both modes:
 priority-tree:
   - name: "VIP_OR_HIGH_VALUE"
     condition: '$req.tier == "PLATINUM" OR $req.amount > 50000'
-    queue: "fast"
+    executor: "fast"
 ```
 
 **With Nested Levels:**
@@ -807,10 +815,10 @@ priority-tree:
     nested-levels:
       - name: "HIGH_VALUE"
         condition: "$req.amount > 50000"
-        queue: "fast"
+        executor: "fast"
       - name: "DEFAULT"
         condition: "true"
-        queue: "standard"
+        executor: "standard"
 ```
 
 ## Example: E-Commerce Order Processing
@@ -818,38 +826,39 @@ priority-tree:
 ```yaml
 pool:
   name: "order-pool"
-
-  scheduler:
-    queues:
-      - name: "fast"
-        index: 0
-        capacity: 1000
-      - name: "standard"
-        index: 1
-        capacity: 2000
-      - name: "bulk"
-        index: 2
-        capacity: 5000
+  version: "1.0"
 
   adapters:
     executors:
+      # Root executor - total system capacity
+      - id: "main"
+        tps: 1000
+        queue_capacity: 5000
+        identifier_field: "$req.orderId"
+
       # Fast lane: VIP and high-value orders
-      - queue_name: "fast"
-        worker_count: 20
-        keep-alive-seconds: 60
-        allow-core-thread-timeout: true
+      - id: "fast"
+        parent: "main"
+        tps: 500
+        queue_capacity: 2000
+        identifier_field: "$req.orderId"
 
       # Standard lane: Regular orders
-      - queue_name: "standard"
-        worker_count: 10
-        keep-alive-seconds: 60
-        allow-core-thread-timeout: true
+      - id: "standard"
+        parent: "main"
+        tps: 300
+        queue_capacity: 1500
+        identifier_field: "$req.orderId"
 
       # Bulk lane: Low priority batch processing
-      - queue_name: "bulk"
-        worker_count: 5
-        keep-alive-seconds: 120
-        allow-core-thread-timeout: true
+      - id: "bulk"
+        parent: "main"
+        tps: 200
+        queue_capacity: 1000
+        identifier_field: "$req.orderId"
+
+  priority-strategy:
+    type: FIFO
     
   priority-tree:
     # VIP customers with large orders → fast
@@ -858,7 +867,7 @@ pool:
       sort-by:
         field: $req.order.total
         direction: DESC
-      queue: "fast"
+      executor: "fast"
 
     # Express shipping → fast
     - name: "EXPRESS"
@@ -866,7 +875,7 @@ pool:
       sort-by:
         field: $sys.submittedAt
         direction: ASC
-      queue: "fast"
+      executor: "fast"
 
     # Standard orders → standard
     - name: "STANDARD"
@@ -874,7 +883,7 @@ pool:
       sort-by:
         field: $sys.submittedAt
         direction: ASC
-      queue: "standard"
+      executor: "standard"
 
     # Everything else → bulk
     - name: "DEFAULT"
@@ -882,7 +891,7 @@ pool:
       sort-by:
         field: $sys.submittedAt
         direction: ASC
-      queue: "bulk"
+      executor: "bulk"
 ```
 
 ## API Reference
