@@ -53,16 +53,19 @@ pool:
       - id: "main"
         tps: 1000              # Max 1000 requests/second
         queue_capacity: 5000   # Shared queue budget when TPS exceeded
+        identifier_field: "$req.requestId"  # Count by request ID
 
       # Child executor for VIP customers
       - id: "vip"
         parent: "main"
         tps: 400               # Max 400 TPS (from main's budget)
+        identifier_field: "$req.requestId"  # Count by request ID
 
       # Child executor for bulk processing  
       - id: "bulk"
         parent: "main"
         tps: 200               # Max 200 TPS (from main's budget)
+        identifier_field: "$req.requestId"  # Count by request ID
 
   priority-strategy:
     type: FIFO
