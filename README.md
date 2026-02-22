@@ -252,25 +252,23 @@ public class OrderService {
 
 ## Configuration Reference
 
-### Condition Syntax Mode
+### Condition Syntax
 
-Path: `pool.syntax-used`
+Conditions use expression strings evaluated against task context:
 
-Selects which condition syntax is allowed in the priority tree:
+```yaml
+priority-tree:
+  - name: "VIP_CUSTOMERS"
+    condition: '$req.customerTier == "PLATINUM"'   # Expression string
+    executor: "fast"
+```
 
-| Value | Description |
-|-------|-------------|
-| `CONDITION_TREE` | Structured `condition` blocks (default) - supports nested hierarchical trees |
-| `CONDITION_EXPR` | Flat `condition-expr` expressions - sequential evaluation, simpler syntax |
-
-**Mode Selection:**
-- **CONDITION_TREE**: Use for complex nested hierarchies with multiple levels
-- **CONDITION_EXPR**: Use for flat, sequential rules that are easier to read and maintain
-
-**Validation:**
-- `CONDITION_TREE` mode: Nodes must use `condition:` (map) and can have `nested-levels`
-- `CONDITION_EXPR` mode: Nodes must use `condition-expr:` (string) and cannot have `nested-levels`
-- Mixing syntaxes within a single config is not allowed
+**Supported Operators:**
+- Comparison: `==`, `!=`, `>`, `<`, `>=`, `<=`
+- Logical: `AND`, `OR`, `NOT`
+- Collection: `IN`, `NOT IN`
+- String: `REGEX`, `STARTS_WITH`, `ENDS_WITH`, `CONTAINS`
+- Special: `EXISTS()`, `IS_NULL()`, `true` (catch-all)
 
 ### TPS-Based Executor Configuration
 
@@ -291,13 +289,11 @@ Each executor defines a TPS limit and optional parent:
 - If parent at limit, child requests are queued
 - Child TPS cannot exceed parent TPS
 
-### Queue Configuration (Scheduler)
+### Queue Configuration (Standalone Scheduler)
 
-Queues are defined under `scheduler` and used by both the scheduler and executor adapter:
+For standalone scheduler use (without TPS executor), define queues under `scheduler`:
 
 Path: `pool.scheduler`
-
-**Example: Multiple named queues**
 
 ```yaml
 pool:
@@ -314,8 +310,8 @@ pool:
   
   priority-tree:
     - name: "HIGH_PRIORITY"
-      condition: '$req.priority == "HIGH"'
-      queue: "fast"
+      condition: "$req.priority > 80"
+      queue: "fast"           # Use queue: for standalone scheduler
     
     - name: "DEFAULT"
       condition: "true"
@@ -324,10 +320,11 @@ pool:
 
 | Property | Default | Description |
 |----------|---------|-------------|
-| `queue-capacity` | 1000 | Capacity for single default queue |
 | `queues[].name` | required | Queue name |
 | `queues[].index` | auto | Priority index (lower = higher priority) |
 | `queues[].capacity` | 1000 | Maximum queue capacity |
+
+**Note:** For TPS-based executors, use `adapters.executors` with `executor:` in priority-tree instead.
 
 ### Priority Strategy
 
@@ -335,7 +332,7 @@ Pool currently supports `FIFO` only. Other types (`TIME_BASED`, `BUCKET_BASED`) 
 
 ### Priority Tree
 
-The priority tree is evaluated top-to-bottom. First matching node wins. Leaf nodes specify the target `queue` for routing.
+The priority tree is evaluated top-to-bottom. First matching node wins. Leaf nodes specify the target `executor` (for TPS executor) or `queue` (for standalone scheduler).
 
 ```yaml
 priority-tree:
@@ -494,15 +491,15 @@ priority-tree:
 
 **Example**: A task with `{region: "NORTH_AMERICA", customerTier: "PLATINUM", amount: 500000}` would match:
 ```
-Path: L1.NORTH_AMERICA → L2.PLATINUM → L3.HIGH_VALUE → Queue: fast
+Path: L1.NORTH_AMERICA → L2.PLATINUM → L3.HIGH_VALUE → Executor: fast
 ```
 
 ### The Path Vector
 
 Each matched path is converted to a **Path Vector** - an array of indices representing which branch was taken at each level:
 
-| Task | Matched Path | Path Vector | Queue |
-|------|--------------|-------------|-------|
+| Task | Matched Path | Path Vector | Executor |
+|------|--------------|-------------|----------|
 | NA + Platinum + High Value | L1.NORTH_AMERICA → L2.PLATINUM → L3.HIGH_VALUE | `[1, 1, 1]` | fast |
 | NA + Platinum + Default | L1.NORTH_AMERICA → L2.PLATINUM → L3.DEFAULT | `[1, 1, 2]` | fast |
 | NA + Gold + Default | L1.NORTH_AMERICA → L2.GOLD → L3.DEFAULT | `[1, 2, 1]` | fast |
@@ -511,7 +508,7 @@ Each matched path is converted to a **Path Vector** - an array of indices repres
 
 ### Vector Comparison (Lexicographic)
 
-Within a queue, tasks are ordered by comparing their path vectors **lexicographically** (like dictionary sorting):
+Within an executor's queue, tasks are ordered by comparing their path vectors **lexicographically** (like dictionary sorting):
 
 ```
 [1, 1, 1] < [1, 1, 2] < [1, 2, 1] < [2, 1, 1] < [3, 1, 1]
@@ -543,20 +540,20 @@ When multiple tasks have the **same path vector** (same bucket), they're ordered
 
 The final priority is determined by:
 
-1. **Primary**: Queue routing (which queue)
-2. **Secondary**: Path Vector (which bucket within queue)
+1. **Primary**: Executor routing (which executor)
+2. **Secondary**: Path Vector (which bucket within executor's queue)
 3. **Tertiary**: Sort-by value (within bucket)
 
 ```
-Task → Policy Evaluation → Queue + PathVector + SortValue
+Task → Policy Evaluation → Executor + PathVector + SortValue
 ```
 
 ### Design Tips
 
 1. **Put highest priority conditions first** - They get lower indices (higher priority)
-2. **Always end with ALWAYS_TRUE** - Catch-all for unmatched tasks
+2. **Always end with `condition: "true"`** - Catch-all for unmatched tasks
 3. **Use nested-levels for multi-dimensional priority** - Region → Tier → Amount
-4. **Specify queue at leaf nodes** - Route tasks to appropriate worker pools
+4. **Specify executor at leaf nodes** - Route tasks to appropriate TPS-limited executors
 5. **Choose sort-by wisely**:
    - `$req.priority DESC` - User-provided priority
    - `$sys.submittedAt ASC` - FIFO within bucket
@@ -639,23 +636,15 @@ ConfigLoader.load("classpath:pool.yaml")
 ```
 
 **4. Section Parsing**
-- `syntax-used` → determines condition parsing mode
-- `adapters.executors` → `List<ExecutorSpec>`
-- `scheduler.queues` → `SchedulerConfig`
-- `priority-tree` → `List<PriorityNodeConfig>`
-  - If `CONDITION_TREE`: parse nested YAML maps
-  - If `CONDITION_EXPR`: tokenize and parse expression strings
+- `adapters.executors` → `List<ExecutorSpec>` (TPS-based executors)
+- `scheduler.queues` → `SchedulerConfig` (standalone scheduler)
+- `priority-tree` → `List<PriorityNodeConfig>` with expression-based conditions
 - `priority-strategy` → `StrategyConfig`
 
 **5. Validation**
 - Priority tree not empty (creates default if needed)
-- Executors reference valid queues
-- Syntax mode consistency (no mixing `condition` and `condition-expr`)
-
-**6. Engine Selection**
-Based on `syntax-used`, the appropriate policy engine is created:
-- `CONDITION_TREE` → `DefaultPolicyEngine` (hierarchical tree traversal)
-- `CONDITION_EXPR` → `ExpressionPolicyEngine` (flat sequential evaluation)
+- Executors have valid parent references
+- Leaf nodes specify `executor` (TPS mode) or `queue` (scheduler mode)
 
 ---
 
@@ -728,24 +717,21 @@ condition: "EXISTS($req.email)"       # Field exists
 condition: "IS_NULL($req.email)"      # Field is null/missing
 ```
 
-## Condition Expressions (Flat)
+## Complex Expressions
 
-As a shorthand, you can use `condition-expr` instead of a structured `condition`. This is useful for
-readable, flat boolean rules.
+Conditions support complex boolean expressions with parentheses:
 
 ```yaml
-syntax-used: CONDITION_EXPR
-condition-expr: 'tier == "VIP" AND (channel == "SUPPORT" OR priority >= 8)'
+condition: '$req.tier == "VIP" AND ($req.channel == "SUPPORT" OR $req.priority >= 8)'
 ```
 
-Supported:
+**Supported:**
 - `AND`, `OR`, `NOT` with parentheses
-- Comparisons: `=`, `==`, `!=`, `>`, `>=`, `<`, `<=`
-- `IN` / `NOT IN` with lists: `region IN ["US","CA"]`
+- Comparisons: `==`, `!=`, `>`, `>=`, `<`, `<=`
+- `IN` / `NOT IN` with lists: `$req.region IN ["US","CA"]`
 - `REGEX`, `STARTS_WITH`, `ENDS_WITH`, `CONTAINS`, `EXISTS`, `IS_NULL`
 
-Field names without `$` are treated as `$req.<field>` (e.g., `tier` → `$req.tier`).
-Use `$sys.` explicitly for system fields.
+All field references must use `$req.`, `$ctx.`, or `$sys.` prefix.
 
 ### Expression Parser Architecture
 
@@ -768,15 +754,15 @@ Expression String → Tokenizer → Tokens → Parser → ConditionConfig Tree
 
 **Parsing Flow:**
 
-1. **Tokenize**: `"tier == \"VIP\" AND priority > 8"` → `[IDENT(tier), EQ, STRING(VIP), AND, IDENT(priority), GT, NUMBER(8)]`
+1. **Tokenize**: `"$req.tier == \"VIP\" AND $req.priority > 8"` → `[FIELD($req.tier), EQ, STRING(VIP), AND, FIELD($req.priority), GT, NUMBER(8)]`
 2. **Parse**: Recursive descent with precedence: `NOT` > `AND` > `OR` (parentheses override)
-3. **Output**: ConditionConfig tree (same structure as YAML-based conditions)
+3. **Output**: ConditionConfig tree
 
 **Example:**
 
 ```java
 // Input
-String expr = "tier == \"PLATINUM\" AND (amount > 1000 OR urgent == true)";
+String expr = "$req.tier == \"PLATINUM\" AND ($req.amount > 1000 OR $req.urgent == true)";
 
 // Parsing
 ConditionConfig config = ConditionExpressionParser.parse(expr);
@@ -795,9 +781,7 @@ ConditionConfig config = ConditionExpressionParser.parse(expr);
 - **Extensible**: Easy to add new operators or keywords via `ExpressionConfig`
 - **Configurable**: All keywords/operators in one place
 
-### Syntax Comparison
-
-The same rule can be expressed in both modes:
+### Examples
 
 **Expression Syntax (Recommended):**
 ```yaml
