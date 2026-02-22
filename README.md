@@ -231,64 +231,13 @@ Each executor defines a TPS limit and optional parent:
 - If parent at limit, child requests are queued
 - Child TPS cannot exceed parent TPS
 
-### Standalone Scheduler (Without Executor)
-
-For integrating with external systems (Kafka, Redis, etc.), use the standalone scheduler:
-
-**Configuration:**
-```yaml
-pool:
-  name: "my-scheduler"
-  
-  scheduler:
-    queues:
-      - name: "fast"
-        index: 0
-        capacity: 1000
-      - name: "bulk"
-        index: 1
-        capacity: 5000
-  
-  priority-tree:
-    - name: "HIGH_PRIORITY"
-      condition: "$req.priority > 80"
-      queue: "fast"           # Use queue: for standalone scheduler
-    
-    - name: "DEFAULT"
-      condition: "true"
-      queue: "bulk"
-```
-
-**Usage:**
-```java
-PoolConfig config = ConfigLoader.load("classpath:pool-scheduler.yaml");
-PriorityScheduler<MyPayload> scheduler = new DefaultPriorityScheduler<>(config);
-
-// Submit - returns queue name
-String queueName = scheduler.submit(ctx, payload);
-
-// Pull from first non-empty queue (by index order)
-MyPayload next = scheduler.getNext();
-
-// Pull from specific queue
-MyPayload task = scheduler.getNext("fast");
-```
-
-| Property | Default | Description |
-|----------|---------|-------------|
-| `queues[].name` | required | Queue name |
-| `queues[].index` | auto | Priority index (lower = higher priority) |
-| `queues[].capacity` | 1000 | Maximum queue capacity |
-
-**Note:** For TPS-based execution, use `adapters.executors` with `executor:` in priority-tree instead.
-
 ### Priority Strategy
 
 Pool currently supports `FIFO` only. Other types (`TIME_BASED`, `BUCKET_BASED`) are reserved for future implementations.
 
 ### Priority Tree
 
-The priority tree is evaluated top-to-bottom. First matching node wins. Leaf nodes specify the target `executor` (for TPS executor) or `queue` (for standalone scheduler).
+The priority tree is evaluated top-to-bottom. First matching node wins. Leaf nodes specify the target `executor` for routing.
 
 ```yaml
 priority-tree:
