@@ -387,7 +387,7 @@ public class ExpressionEvaluator {
         }
 
         private String normalizeField(String field) {
-            if (field.startsWith(SYSTEM_PREFIX) || field.startsWith(REQUEST_PREFIX)) {
+            if (field.startsWith(REQUEST_PREFIX) || field.startsWith(SYSTEM_PREFIX) || field.startsWith(CONTEXT_PREFIX)) {
                 return field;
             }
             return REQUEST_PREFIX + field;

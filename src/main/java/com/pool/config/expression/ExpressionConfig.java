@@ -81,4 +81,9 @@ public final class ExpressionConfig {
      * Field name prefix for system variables.
      */
     public static final String SYSTEM_PREFIX = "$sys.";
+
+    /**
+     * Field name prefix for context variables.
+     */
+    public static final String CONTEXT_PREFIX = "$ctx.";
 }
