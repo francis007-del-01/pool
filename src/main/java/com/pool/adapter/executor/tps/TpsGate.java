@@ -17,25 +17,44 @@ public class TpsGate {
 
     private static final Logger log = LoggerFactory.getLogger(TpsGate.class);
 
+    // Default TTL for admitted requests: 5 minutes
+    private static final long DEFAULT_ADMITTED_TTL_MS = 5 * 60 * 1000L;
+
     private final ExecutorHierarchy hierarchy;
     private final ConcurrentHashMap<String, SlidingWindowCounter> counters;
     private final long windowSizeMs;
     private final VariableResolver variableResolver;
+
+    // Per-executor TTL-based admitted sets: requests that have been admitted
+    // bypass TPS checks for that specific executor until they expire. This prevents
+    // re-counting long-running requests that need additional threads after their
+    // TPS window has expired.
+    private final ConcurrentHashMap<String, SlidingWindowCounter> admittedIds;
+    private final long admittedTtlMs;
 
     public TpsGate(ExecutorHierarchy hierarchy) {
         this(hierarchy, 1000); // Default 1 second window
     }
 
     public TpsGate(ExecutorHierarchy hierarchy, long windowSizeMs) {
+        this(hierarchy, windowSizeMs, DEFAULT_ADMITTED_TTL_MS);
+    }
+
+    public TpsGate(ExecutorHierarchy hierarchy, long windowSizeMs, long admittedTtlMs) {
         this.hierarchy = hierarchy;
         this.counters = new ConcurrentHashMap<>();
         this.windowSizeMs = windowSizeMs;
         this.variableResolver = new DefaultVariableResolver();
+        this.admittedTtlMs = admittedTtlMs;
+        this.admittedIds = new ConcurrentHashMap<>();
         
-        // Initialize counters for all executors
+        // Initialize counters and admitted sets for all executors
         for (String executorId : hierarchy.getAllExecutorIds()) {
             counters.put(executorId, new SlidingWindowCounter(windowSizeMs));
+            admittedIds.put(executorId, new SlidingWindowCounter(admittedTtlMs));
         }
+
+        log.info("TpsGate initialized: windowSize={}ms, admittedTtl={}ms", windowSizeMs, admittedTtlMs);
     }
 
     /**
@@ -53,6 +72,15 @@ public class TpsGate {
         }
         if (executorId == null || executorId.isEmpty()) {
             throw new IllegalArgumentException("Executor ID cannot be null or empty");
+        }
+
+        // Check if this request was already admitted for this executor — bypass TPS
+        String requestId = context.getTaskId();
+        SlidingWindowCounter admittedSet = admittedIds.get(executorId);
+        if (admittedSet != null && admittedSet.contains(requestId)) {
+            log.debug("Request '{}' already admitted for executor '{}', bypassing TPS",
+                    requestId, executorId);
+            return true;
         }
 
         // Get the executor chain (self + ancestors)
@@ -94,7 +122,12 @@ public class TpsGate {
             }
         }
         
-        log.debug("Request acquired for executor '{}' (chain: {})", executorId, chain);
+        // Mark request as admitted for this executor
+        if (admittedSet != null) {
+            admittedSet.add(requestId);
+        }
+        
+        log.debug("Request acquired and admitted for executor '{}' (chain: {})", executorId, chain);
         return true;
     }
 
@@ -112,6 +145,14 @@ public class TpsGate {
         }
         if (executorId == null || executorId.isEmpty()) {
             throw new IllegalArgumentException("Executor ID cannot be null or empty");
+        }
+
+        // Check if this request was already admitted for this executor — bypass TPS
+        SlidingWindowCounter admittedSet = admittedIds.get(executorId);
+        if (admittedSet != null && admittedSet.contains(requestId)) {
+            log.debug("Request '{}' already admitted for executor '{}', bypassing TPS",
+                    requestId, executorId);
+            return true;
         }
 
         // Get the executor chain (self + ancestors)
@@ -145,7 +186,12 @@ public class TpsGate {
             }
         }
         
-        log.debug("Request '{}' acquired for executor '{}' (chain: {})", 
+        // Mark request as admitted for this executor
+        if (admittedSet != null) {
+            admittedSet.add(requestId);
+        }
+        
+        log.debug("Request '{}' acquired and admitted for executor '{}' (chain: {})", 
                 requestId, executorId, chain);
         return true;
     }
@@ -270,5 +316,15 @@ public class TpsGate {
         for (SlidingWindowCounter counter : counters.values()) {
             counter.clear();
         }
+        for (SlidingWindowCounter admitted : admittedIds.values()) {
+            admitted.clear();
+        }
+    }
+
+    /**
+     * Get the admitted TTL in milliseconds.
+     */
+    public long getAdmittedTtlMs() {
+        return admittedTtlMs;
     }
 }
