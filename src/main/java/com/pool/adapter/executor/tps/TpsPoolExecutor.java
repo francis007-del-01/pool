@@ -14,6 +14,8 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * TPS-based executor with hierarchical executor support.
@@ -37,6 +39,10 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
 
     // Queue drainer threads (one per executor)
     private final Map<String, Thread> drainerThreads;
+
+    // Per-executor locks and conditions for capacity signaling
+    private final Map<String, ReentrantLock> capacityLocks;
+    private final Map<String, Condition> capacityConditions;
 
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
     private final AtomicInteger submittedCount = new AtomicInteger(0);
@@ -68,6 +74,27 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
             t.setDaemon(true);
             return t;
         });
+
+        // Initialize per-executor capacity locks and conditions
+        this.capacityLocks = new ConcurrentHashMap<>();
+        this.capacityConditions = new ConcurrentHashMap<>();
+        for (String executorId : hierarchy.getAllExecutorIds()) {
+            ReentrantLock lock = new ReentrantLock();
+            capacityLocks.put(executorId, lock);
+            capacityConditions.put(executorId, lock.newCondition());
+
+            // Register capacity callback: when TPS counter evicts, signal the drainer
+            final String execId = executorId;
+            tpsGate.onCapacityAvailable(executorId, () -> {
+                ReentrantLock l = capacityLocks.get(execId);
+                l.lock();
+                try {
+                    capacityConditions.get(execId).signalAll();
+                } finally {
+                    l.unlock();
+                }
+            });
+        }
 
         // Start drainer threads for each executor
         this.drainerThreads = new ConcurrentHashMap<>();
@@ -204,9 +231,12 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
 
     /**
      * Drains queued tasks when TPS capacity becomes available.
+     * Uses dual-trigger: blocks on queue for new tasks, and wakes on capacity signal.
      */
     private void drainQueue(String executorId) {
         PriorityBlockingQueue<QueuedTask> queue = executorQueues.get(executorId);
+        ReentrantLock lock = capacityLocks.get(executorId);
+        Condition capacityAvailable = capacityConditions.get(executorId);
         
         while (!shutdown.get()) {
             try {
@@ -216,18 +246,25 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
                     continue;
                 }
 
-                // Check if we have TPS capacity (use TaskContext for per-executor identifiers)
-                if (tpsGate.tryAcquire(task.context(), executorId)) {
+                // Hold the task and wait for capacity instead of re-inserting
+                while (!shutdown.get() && !tpsGate.tryAcquire(task.context(), executorId)) {
+                    // Wait for capacity signal or timeout as safety net
+                    lock.lock();
+                    try {
+                        capacityAvailable.await(tpsGate.getWindowSizeMs(), TimeUnit.MILLISECONDS);
+                    } finally {
+                        lock.unlock();
+                    }
+                }
+
+                if (!shutdown.get()) {
                     executorQueueSizes.get(executorId).decrementAndGet();
                     executeTask(task.task(), task.requestId(), executorId);
-                    
                     log.debug("Dequeued and executed task {} for executor '{}'",
                             task.requestId(), executorId);
                 } else {
-                    // Put back in queue if no capacity
+                    // Shutting down — put task back so it's not lost
                     queue.offer(task);
-                    // Small backoff to avoid busy-waiting
-                    Thread.sleep(10);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();

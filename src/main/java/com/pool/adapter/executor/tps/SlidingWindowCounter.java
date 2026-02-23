@@ -29,6 +29,9 @@ public class SlidingWindowCounter {
     // Live count of identifiers currently in the window
     private final AtomicInteger size = new AtomicInteger(0);
 
+    // Optional callback fired when entries are evicted (capacity freed)
+    private volatile Runnable onEviction;
+
     public SlidingWindowCounter() {
         this(1000); // Default 1 second window
     }
@@ -139,6 +142,14 @@ public class SlidingWindowCounter {
     }
 
     /**
+     * Register a callback to be invoked when entries are evicted from the window.
+     * This signals that capacity has been freed.
+     */
+    public void setOnEviction(Runnable onEviction) {
+        this.onEviction = onEviction;
+    }
+
+    /**
      * Drain expired entries from the head of the time-ordered queue.
      * Since entries are inserted in time order, we only need to poll from the head
      * until we hit a non-expired entry.
@@ -146,6 +157,7 @@ public class SlidingWindowCounter {
     private void evictExpired() {
         long windowStart = System.currentTimeMillis() - windowSizeMs;
 
+        boolean evicted = false;
         Entry head;
         while ((head = timeQueue.peek()) != null && head.timestamp < windowStart) {
             // Remove from queue
@@ -158,6 +170,15 @@ public class SlidingWindowCounter {
             // It may have been removed already by remove() or replaced by a newer add().
             if (identifiers.remove(polled.identifier, polled.timestamp)) {
                 size.decrementAndGet();
+                evicted = true;
+            }
+        }
+
+        // Notify listener that capacity has been freed
+        if (evicted) {
+            Runnable callback = onEviction;
+            if (callback != null) {
+                callback.run();
             }
         }
     }

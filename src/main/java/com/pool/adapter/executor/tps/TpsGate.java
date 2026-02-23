@@ -32,6 +32,9 @@ public class TpsGate {
     private final ConcurrentHashMap<String, SlidingWindowCounter> admittedIds;
     private final long admittedTtlMs;
 
+    // Per-executor capacity callbacks — fired when TPS counter evicts entries
+    private final ConcurrentHashMap<String, Runnable> capacityCallbacks;
+
     public TpsGate(ExecutorHierarchy hierarchy) {
         this(hierarchy, 1000); // Default 1 second window
     }
@@ -47,11 +50,22 @@ public class TpsGate {
         this.variableResolver = new DefaultVariableResolver();
         this.admittedTtlMs = admittedTtlMs;
         this.admittedIds = new ConcurrentHashMap<>();
+        this.capacityCallbacks = new ConcurrentHashMap<>();
         
         // Initialize counters and admitted sets for all executors
         for (String executorId : hierarchy.getAllExecutorIds()) {
-            counters.put(executorId, new SlidingWindowCounter(windowSizeMs));
+            SlidingWindowCounter counter = new SlidingWindowCounter(windowSizeMs);
+            counters.put(executorId, counter);
             admittedIds.put(executorId, new SlidingWindowCounter(admittedTtlMs));
+
+            // When this counter evicts entries, fire the capacity callback for this executor
+            final String execId = executorId;
+            counter.setOnEviction(() -> {
+                Runnable callback = capacityCallbacks.get(execId);
+                if (callback != null) {
+                    callback.run();
+                }
+            });
         }
 
         log.info("TpsGate initialized: windowSize={}ms, admittedTtl={}ms", windowSizeMs, admittedTtlMs);
@@ -326,5 +340,13 @@ public class TpsGate {
      */
     public long getAdmittedTtlMs() {
         return admittedTtlMs;
+    }
+
+    /**
+     * Register a callback to be invoked when TPS capacity becomes available
+     * for the given executor (i.e., when entries are evicted from its TPS window).
+     */
+    public void onCapacityAvailable(String executorId, Runnable callback) {
+        capacityCallbacks.put(executorId, callback);
     }
 }
