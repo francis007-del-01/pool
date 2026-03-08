@@ -25,7 +25,7 @@ public class PriorityStrategyFactory {
             return new FIFOStrategy(capacity);
         }
 
-        StrategyType type = config.type();
+        StrategyType type = config.getType();
         if (type == null) {
             type = StrategyType.FIFO;
         }

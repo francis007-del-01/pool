@@ -1,5 +1,8 @@
 package com.pool.adapter.executor.tps;
 
+import lombok.Getter;
+import lombok.Setter;
+
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -18,6 +21,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class SlidingWindowCounter {
 
+    /**
+     * -- GETTER --
+     *  Get the window size in milliseconds.
+     */
+    @Getter
     private final long windowSizeMs;
 
     // Global time-ordered queue — oldest entries at the head
@@ -29,7 +37,13 @@ public class SlidingWindowCounter {
     // Live count of identifiers currently in the window
     private final AtomicInteger size = new AtomicInteger(0);
 
+    /**
+     * -- SETTER --
+     *  Register a callback to be invoked when entries are evicted from the window.
+     *  This signals that capacity has been freed.
+     */
     // Optional callback fired when entries are evicted (capacity freed)
+    @Setter
     private volatile Runnable onEviction;
 
     public SlidingWindowCounter() {
@@ -132,21 +146,6 @@ public class SlidingWindowCounter {
         timeQueue.clear();
         identifiers.clear();
         size.set(0);
-    }
-
-    /**
-     * Get the window size in milliseconds.
-     */
-    public long getWindowSizeMs() {
-        return windowSizeMs;
-    }
-
-    /**
-     * Register a callback to be invoked when entries are evicted from the window.
-     * This signals that capacity has been freed.
-     */
-    public void setOnEviction(Runnable onEviction) {
-        this.onEviction = onEviction;
     }
 
     /**

@@ -12,10 +12,8 @@ import org.junit.jupiter.api.DisplayName;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -31,13 +29,13 @@ class TpsPoolExecutorTest {
         config = createTestConfig();
         ExecutorHierarchy hierarchy = new ExecutorHierarchy(config.getExecutors());
         TpsGate tpsGate = new TpsGate(hierarchy);
-        java.util.concurrent.ExecutorService threadPool = java.util.concurrent.Executors.newCachedThreadPool(r -> {
+        ExecutorService threadPool = Executors.newCachedThreadPool(r -> {
             Thread t = new Thread(r);
             t.setName("test-pool-worker-" + System.nanoTime());
             t.setDaemon(true);
             return t;
         });
-        TaskQueueManager queueManager = new TaskQueueManager(hierarchy, tpsGate, threadPool);
+        TaskQueueManager queueManager = buildQueueManager(hierarchy, tpsGate, threadPool);
         com.pool.policy.PolicyEngine policyEngine = new com.pool.policy.DefaultPolicyEngine(config);
         executor = new TpsPoolExecutor(config, policyEngine, hierarchy, tpsGate, queueManager);
     }
@@ -241,6 +239,33 @@ class TpsPoolExecutorTest {
         }
 
         assertEquals(taskCount, counter.get());
+    }
+
+    private static TaskQueueManager buildQueueManager(ExecutorHierarchy hierarchy, TpsGate tpsGate, ExecutorService threadPool) {
+        Map<String, java.util.concurrent.locks.ReentrantLock> locks = new ConcurrentHashMap<>();
+        Map<String, java.util.concurrent.locks.Condition> conditions = new ConcurrentHashMap<>();
+        Map<String, com.pool.strategy.PriorityStrategy> strategies = new ConcurrentHashMap<>();
+
+        for (String id : hierarchy.getAllExecutorIds()) {
+            java.util.concurrent.locks.ReentrantLock lock = new java.util.concurrent.locks.ReentrantLock();
+            locks.put(id, lock);
+            conditions.put(id, lock.newCondition());
+
+            int cap = hierarchy.getQueueCapacity(id);
+            strategies.put(id, com.pool.strategy.PriorityStrategyFactory.createDefault(cap <= 0 ? Integer.MAX_VALUE : cap));
+
+            SlidingWindowCounter counter = tpsGate.getCounter(id);
+            if (counter != null) {
+                final java.util.concurrent.locks.ReentrantLock l = lock;
+                final java.util.concurrent.locks.Condition c = conditions.get(id);
+                counter.setOnEviction(() -> {
+                    l.lock();
+                    try { c.signalAll(); } finally { l.unlock(); }
+                });
+            }
+        }
+
+        return new TaskQueueManager(hierarchy, tpsGate, strategies, locks, conditions, threadPool);
     }
 
     private TaskContext createTaskContext(String executorHint) {

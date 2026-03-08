@@ -1,6 +1,7 @@
 package com.pool.adapter.executor.tps;
 
 import com.pool.config.ExecutorSpec;
+import com.pool.core.TaskContext;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;
@@ -28,12 +29,16 @@ class TpsGateTest {
         gate = new TpsGate(hierarchy, 1000); // 1 second window
     }
 
+    private static TaskContext ctx(String taskId) {
+        return TaskContext.builder().taskId(taskId).build();
+    }
+
     @Test
     @DisplayName("Should acquire when under TPS limit")
     void shouldAcquireUnderLimit() {
-        assertTrue(gate.tryAcquire("req-1", "vip"));
-        assertTrue(gate.tryAcquire("req-2", "vip"));
-        assertTrue(gate.tryAcquire("req-3", "vip"));
+        assertTrue(gate.tryAcquire(ctx("req-1"), "vip"));
+        assertTrue(gate.tryAcquire(ctx("req-2"), "vip"));
+        assertTrue(gate.tryAcquire(ctx("req-3"), "vip"));
 
         assertEquals(3, gate.getCurrentTps("vip"));
         assertEquals(3, gate.getCurrentTps("main")); // Also counts in parent
@@ -44,11 +49,11 @@ class TpsGateTest {
     void shouldRejectAtExecutorLimit() {
         // Fill up vip's limit (5 TPS)
         for (int i = 1; i <= 5; i++) {
-            assertTrue(gate.tryAcquire("req-" + i, "vip"));
+            assertTrue(gate.tryAcquire(ctx("req-" + i), "vip"));
         }
 
         // 6th should fail (vip at limit)
-        assertFalse(gate.tryAcquire("req-6", "vip"));
+        assertFalse(gate.tryAcquire(ctx("req-6"), "vip"));
         assertEquals(5, gate.getCurrentTps("vip"));
     }
 
@@ -57,21 +62,21 @@ class TpsGateTest {
     void shouldRejectAtParentLimit() {
         // Fill up main's limit via vip and bulk
         for (int i = 1; i <= 5; i++) {
-            assertTrue(gate.tryAcquire("vip-" + i, "vip"));
+            assertTrue(gate.tryAcquire(ctx("vip-" + i), "vip"));
         }
         for (int i = 1; i <= 3; i++) {
-            assertTrue(gate.tryAcquire("bulk-" + i, "bulk"));
+            assertTrue(gate.tryAcquire(ctx("bulk-" + i), "bulk"));
         }
         // Now main has 8/10
 
         // Add 2 more to main directly
-        assertTrue(gate.tryAcquire("main-1", "main"));
-        assertTrue(gate.tryAcquire("main-2", "main"));
+        assertTrue(gate.tryAcquire(ctx("main-1"), "main"));
+        assertTrue(gate.tryAcquire(ctx("main-2"), "main"));
         // Now main has 10/10
 
         // Both children should fail (parent at limit)
-        assertFalse(gate.tryAcquire("vip-overflow", "vip"));
-        assertFalse(gate.tryAcquire("bulk-overflow", "bulk"));
+        assertFalse(gate.tryAcquire(ctx("vip-overflow"), "vip"));
+        assertFalse(gate.tryAcquire(ctx("bulk-overflow"), "bulk"));
     }
 
     @Test
@@ -81,7 +86,7 @@ class TpsGateTest {
 
         // Fill main to limit
         for (int i = 1; i <= 10; i++) {
-            gate.tryAcquire("main-" + i, "main");
+            gate.tryAcquire(ctx("main-" + i), "main");
         }
 
         assertFalse(gate.hasCapacityWithAncestors("vip"));
@@ -93,8 +98,8 @@ class TpsGateTest {
     void shouldGetAvailableCapacity() {
         assertEquals(5, gate.getAvailableCapacity("vip"));
 
-        gate.tryAcquire("req-1", "vip");
-        gate.tryAcquire("req-2", "vip");
+        gate.tryAcquire(ctx("req-1"), "vip");
+        gate.tryAcquire(ctx("req-2"), "vip");
 
         assertEquals(3, gate.getAvailableCapacity("vip"));
     }
@@ -102,7 +107,7 @@ class TpsGateTest {
     @Test
     @DisplayName("Should release request from counters")
     void shouldReleaseRequest() {
-        gate.tryAcquire("req-1", "vip");
+        gate.tryAcquire(ctx("req-1"), "vip");
         assertEquals(1, gate.getCurrentTps("vip"));
 
         gate.release("req-1", "vip");
@@ -112,9 +117,9 @@ class TpsGateTest {
     @Test
     @DisplayName("Should clear all counters")
     void shouldClearCounters() {
-        gate.tryAcquire("req-1", "vip");
-        gate.tryAcquire("req-2", "bulk");
-        gate.tryAcquire("req-3", "main");
+        gate.tryAcquire(ctx("req-1"), "vip");
+        gate.tryAcquire(ctx("req-2"), "bulk");
+        gate.tryAcquire(ctx("req-3"), "main");
 
         gate.clear();
 
@@ -131,7 +136,7 @@ class TpsGateTest {
 
         // Fill vip to limit
         for (int i = 1; i <= 5; i++) {
-            gate.tryAcquire("vip-" + i, "vip");
+            gate.tryAcquire(ctx("vip-" + i), "vip");
         }
 
         withCapacity = gate.getExecutorsWithCapacity();
@@ -140,21 +145,19 @@ class TpsGateTest {
     }
 
     @Test
-    @DisplayName("Should throw on null request ID")
-    void shouldThrowOnNullRequestId() {
+    @DisplayName("Should throw on null context")
+    void shouldThrowOnNullContext() {
         assertThrows(IllegalArgumentException.class, 
-                () -> gate.tryAcquire((String) null, "vip"));
-        assertThrows(IllegalArgumentException.class, 
-                () -> gate.tryAcquire("", "vip"));
+                () -> gate.tryAcquire((TaskContext) null, "vip"));
     }
 
     @Test
     @DisplayName("Should throw on null executor ID")
     void shouldThrowOnNullExecutorId() {
         assertThrows(IllegalArgumentException.class, 
-                () -> gate.tryAcquire("req-1", null));
+                () -> gate.tryAcquire(ctx("req-1"), null));
         assertThrows(IllegalArgumentException.class, 
-                () -> gate.tryAcquire("req-1", ""));
+                () -> gate.tryAcquire(ctx("req-1"), ""));
     }
 
     @Test
@@ -168,7 +171,7 @@ class TpsGateTest {
 
         // Should always have capacity
         for (int i = 1; i <= 1000; i++) {
-            assertTrue(unboundedGate.tryAcquire("req-" + i, "main"));
+            assertTrue(unboundedGate.tryAcquire(ctx("req-" + i), "main"));
         }
 
         assertEquals(Integer.MAX_VALUE, unboundedGate.getAvailableCapacity("main"));
@@ -230,26 +233,26 @@ class TpsGateTest {
         assertEquals(3, gate.getHierarchy().getTps("bulk"));
         
         // First 3 unique identifiers should be allowed
-        assertTrue(gate.tryAcquire("req-1", "bulk"));
+        assertTrue(gate.tryAcquire(ctx("req-1"), "bulk"));
         assertEquals(1, gate.getCurrentTps("bulk"));
         assertTrue(gate.hasCapacity("bulk")); // 1 < 3
         
-        assertTrue(gate.tryAcquire("req-2", "bulk"));
+        assertTrue(gate.tryAcquire(ctx("req-2"), "bulk"));
         assertEquals(2, gate.getCurrentTps("bulk"));
         assertTrue(gate.hasCapacity("bulk")); // 2 < 3
         
-        assertTrue(gate.tryAcquire("req-3", "bulk"));
+        assertTrue(gate.tryAcquire(ctx("req-3"), "bulk"));
         assertEquals(3, gate.getCurrentTps("bulk"));
         assertFalse(gate.hasCapacity("bulk")); // 3 < 3 = false
         
         // Fourth unique should be rejected (TPS limit = 3)
-        assertFalse(gate.tryAcquire("req-4", "bulk"));
+        assertFalse(gate.tryAcquire(ctx("req-4"), "bulk"));
         assertEquals(3, gate.getCurrentTps("bulk")); // Still 3
         
         // But existing identifiers should still be allowed (no new slot needed)
-        assertTrue(gate.tryAcquire("req-1", "bulk"));
-        assertTrue(gate.tryAcquire("req-2", "bulk"));
-        assertTrue(gate.tryAcquire("req-3", "bulk"));
+        assertTrue(gate.tryAcquire(ctx("req-1"), "bulk"));
+        assertTrue(gate.tryAcquire(ctx("req-2"), "bulk"));
+        assertTrue(gate.tryAcquire(ctx("req-3"), "bulk"));
         assertEquals(3, gate.getCurrentTps("bulk")); // Still 3, no increment
     }
 

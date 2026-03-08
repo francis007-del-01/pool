@@ -8,9 +8,6 @@ import com.pool.policy.PolicyEngine;
 import com.pool.priority.PriorityKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
-
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -18,7 +15,6 @@ import java.util.concurrent.atomic.AtomicInteger;
  * TPS-based executor with hierarchical executor support.
  * All dependencies are injected — this class is a thin coordinator.
  */
-@Component
 public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
 
     private static final Logger log = LoggerFactory.getLogger(TpsPoolExecutor.class);
@@ -32,7 +28,6 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
     private final AtomicInteger submittedCount = new AtomicInteger(0);
     private final AtomicInteger rejectedCount = new AtomicInteger(0);
 
-    @Autowired
     public TpsPoolExecutor(PoolConfig config,
                            PolicyEngine policyEngine,
                            ExecutorHierarchy hierarchy,

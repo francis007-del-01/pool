@@ -4,16 +4,12 @@ import com.pool.config.ExecutorSpec;
 import com.pool.config.PoolConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
-
 import java.util.*;
 
 /**
  * Manages hierarchical executor relationships (parent-child).
  * Validates configuration and provides traversal methods.
  */
-@Component
 public class ExecutorHierarchy {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutorHierarchy.class);
@@ -22,7 +18,6 @@ public class ExecutorHierarchy {
     private final Map<String, List<String>> children; // parent -> children
     private final String rootId;
 
-    @Autowired
     public ExecutorHierarchy(PoolConfig config) {
         this(config.getExecutors());
     }

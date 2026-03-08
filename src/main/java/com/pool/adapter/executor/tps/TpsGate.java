@@ -3,10 +3,9 @@ package com.pool.adapter.executor.tps;
 import com.pool.core.TaskContext;
 import com.pool.variable.DefaultVariableResolver;
 import com.pool.variable.VariableResolver;
+import lombok.Getter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -15,7 +14,6 @@ import java.util.concurrent.ConcurrentHashMap;
  * TPS-based admission control gate.
  * Manages TPS limits for hierarchical executors.
  */
-@Component
 public class TpsGate {
 
     private static final Logger log = LoggerFactory.getLogger(TpsGate.class);
@@ -23,8 +21,18 @@ public class TpsGate {
     // Default TTL for admitted requests: 5 minutes
     private static final long DEFAULT_ADMITTED_TTL_MS = 5 * 60 * 1000L;
 
+    /**
+     * -- GETTER --
+     *  Get the underlying hierarchy.
+     */
+    @Getter
     private final ExecutorHierarchy hierarchy;
     private final ConcurrentHashMap<String, SlidingWindowCounter> counters;
+    /**
+     * -- GETTER --
+     *  Get window size in milliseconds.
+     */
+    @Getter
     private final long windowSizeMs;
     private final VariableResolver variableResolver;
 
@@ -33,14 +41,39 @@ public class TpsGate {
     // re-counting long-running requests that need additional threads after their
     // TPS window has expired.
     private final ConcurrentHashMap<String, SlidingWindowCounter> admittedIds;
+    /**
+     * -- GETTER --
+     *  Get the admitted TTL in milliseconds.
+     */
+    @Getter
     private final long admittedTtlMs;
 
-    // Per-executor capacity callbacks — fired when TPS counter evicts entries
-    private final ConcurrentHashMap<String, Runnable> capacityCallbacks;
 
-    @Autowired
+    /**
+     * Primary constructor — accepts pre-built counters and dependencies.
+     * Used by TpsSystemConfig for centralized initialization.
+     */
+    public TpsGate(ExecutorHierarchy hierarchy,
+                   ConcurrentHashMap<String, SlidingWindowCounter> counters,
+                   ConcurrentHashMap<String, SlidingWindowCounter> admittedIds,
+                   VariableResolver variableResolver,
+                   long windowSizeMs,
+                   long admittedTtlMs) {
+        this.hierarchy = hierarchy;
+        this.counters = counters;
+        this.admittedIds = admittedIds;
+        this.variableResolver = variableResolver;
+        this.windowSizeMs = windowSizeMs;
+        this.admittedTtlMs = admittedTtlMs;
+
+        log.info("TpsGate initialized: windowSize={}ms, admittedTtl={}ms", windowSizeMs, admittedTtlMs);
+    }
+
+    /**
+     * Convenience constructor for testing — creates counters and admitted sets internally.
+     */
     public TpsGate(ExecutorHierarchy hierarchy) {
-        this(hierarchy, 1000); // Default 1 second window
+        this(hierarchy, 1000);
     }
 
     public TpsGate(ExecutorHierarchy hierarchy, long windowSizeMs) {
@@ -48,31 +81,12 @@ public class TpsGate {
     }
 
     public TpsGate(ExecutorHierarchy hierarchy, long windowSizeMs, long admittedTtlMs) {
-        this.hierarchy = hierarchy;
-        this.counters = new ConcurrentHashMap<>();
-        this.windowSizeMs = windowSizeMs;
-        this.variableResolver = new DefaultVariableResolver();
-        this.admittedTtlMs = admittedTtlMs;
-        this.admittedIds = new ConcurrentHashMap<>();
-        this.capacityCallbacks = new ConcurrentHashMap<>();
-        
-        // Initialize counters and admitted sets for all executors
-        for (String executorId : hierarchy.getAllExecutorIds()) {
-            SlidingWindowCounter counter = new SlidingWindowCounter(windowSizeMs);
-            counters.put(executorId, counter);
-            admittedIds.put(executorId, new SlidingWindowCounter(admittedTtlMs));
-
-            // When this counter evicts entries, fire the capacity callback for this executor
-            final String execId = executorId;
-            counter.setOnEviction(() -> {
-                Runnable callback = capacityCallbacks.get(execId);
-                if (callback != null) {
-                    callback.run();
-                }
-            });
-        }
-
-        log.info("TpsGate initialized: windowSize={}ms, admittedTtl={}ms", windowSizeMs, admittedTtlMs);
+        this(hierarchy,
+             initCounters(hierarchy, windowSizeMs),
+             initAdmittedSets(hierarchy, admittedTtlMs),
+             new DefaultVariableResolver(),
+             windowSizeMs,
+             admittedTtlMs);
     }
 
     /**
@@ -92,12 +106,14 @@ public class TpsGate {
             throw new IllegalArgumentException("Executor ID cannot be null or empty");
         }
 
-        // Check if this request was already admitted for this executor — bypass TPS
-        String requestId = context.getTaskId();
+        // Check if this task was already admitted for this executor — bypass TPS
+        // Uses taskId (not resolved identifier) because two different tasks can share
+        // the same identifier (e.g., same IP) but each task needs its own admission
+        String taskId = context.getTaskId();
         SlidingWindowCounter admittedSet = admittedIds.get(executorId);
-        if (admittedSet != null && admittedSet.contains(requestId)) {
-            log.debug("Request '{}' already admitted for executor '{}', bypassing TPS",
-                    requestId, executorId);
+        if (admittedSet != null && admittedSet.contains(taskId)) {
+            log.debug("Task '{}' already admitted for executor '{}', bypassing TPS",
+                    taskId, executorId);
             return true;
         }
 
@@ -108,7 +124,7 @@ public class TpsGate {
         // If identifier already exists in window, it's allowed (already counted)
         // If identifier is new, check capacity first
         for (String execId : chain) {
-            String identifier = resolveIdentifier(context, execId);
+            String execIdentifier = resolveIdentifier(context, execId);
             SlidingWindowCounter counter = counters.get(execId);
             
             if (counter == null) {
@@ -116,101 +132,36 @@ public class TpsGate {
             }
             
             // If identifier already in window, allow it (no new slot needed)
-            if (counter.contains(identifier)) {
+            if (counter.contains(execIdentifier)) {
                 log.debug("Identifier '{}' already in window for executor '{}', allowing", 
-                        identifier, execId);
+                        execIdentifier, execId);
                 continue;
             }
             
             // New identifier - check if we have capacity
             if (!hasCapacity(execId)) {
                 log.debug("TPS limit reached for executor '{}', rejecting new identifier '{}'", 
-                        execId, identifier);
+                        execId, execIdentifier);
                 return false;
             }
         }
         
         // All have capacity or identifier already exists, add new identifiers
         for (String execId : chain) {
-            String identifier = resolveIdentifier(context, execId);
+            String execIdentifier = resolveIdentifier(context, execId);
             SlidingWindowCounter counter = counters.get(execId);
             if (counter != null) {
                 // tryAdd only adds if not already present
-                counter.tryAdd(identifier);
+                counter.tryAdd(execIdentifier);
             }
         }
         
-        // Mark request as admitted for this executor
+        // Mark task as admitted for this executor
         if (admittedSet != null) {
-            admittedSet.add(requestId);
+            admittedSet.add(taskId);
         }
         
         log.debug("Request acquired and admitted for executor '{}' (chain: {})", executorId, chain);
-        return true;
-    }
-
-    /**
-     * Try to acquire permission using a simple request ID (for backward compatibility).
-     * Uses the same ID for all executors in the chain.
-     *
-     * @param requestId  Unique request identifier
-     * @param executorId Target executor ID
-     * @return true if acquired, false if TPS limit exceeded
-     */
-    public boolean tryAcquire(String requestId, String executorId) {
-        if (requestId == null || requestId.isEmpty()) {
-            throw new IllegalArgumentException("Request ID cannot be null or empty");
-        }
-        if (executorId == null || executorId.isEmpty()) {
-            throw new IllegalArgumentException("Executor ID cannot be null or empty");
-        }
-
-        // Check if this request was already admitted for this executor — bypass TPS
-        SlidingWindowCounter admittedSet = admittedIds.get(executorId);
-        if (admittedSet != null && admittedSet.contains(requestId)) {
-            log.debug("Request '{}' already admitted for executor '{}', bypassing TPS",
-                    requestId, executorId);
-            return true;
-        }
-
-        // Get the executor chain (self + ancestors)
-        List<String> chain = hierarchy.getExecutorChain(executorId);
-        
-        // Check capacity for new identifiers only
-        for (String execId : chain) {
-            SlidingWindowCounter counter = counters.get(execId);
-            if (counter == null) {
-                continue;
-            }
-            
-            // If identifier already in window, allow it
-            if (counter.contains(requestId)) {
-                continue;
-            }
-            
-            // New identifier - check capacity
-            if (!hasCapacity(execId)) {
-                log.debug("TPS limit reached for executor '{}', rejecting request '{}'", 
-                        execId, requestId);
-                return false;
-            }
-        }
-        
-        // Add new identifiers (tryAdd skips duplicates)
-        for (String execId : chain) {
-            SlidingWindowCounter counter = counters.get(execId);
-            if (counter != null) {
-                counter.tryAdd(requestId);
-            }
-        }
-        
-        // Mark request as admitted for this executor
-        if (admittedSet != null) {
-            admittedSet.add(requestId);
-        }
-        
-        log.debug("Request '{}' acquired and admitted for executor '{}' (chain: {})", 
-                requestId, executorId, chain);
         return true;
     }
 
@@ -314,20 +265,6 @@ public class TpsGate {
     }
 
     /**
-     * Get the underlying hierarchy.
-     */
-    public ExecutorHierarchy getHierarchy() {
-        return hierarchy;
-    }
-
-    /**
-     * Get window size in milliseconds.
-     */
-    public long getWindowSizeMs() {
-        return windowSizeMs;
-    }
-
-    /**
      * Clear all counters (for testing).
      */
     public void clear() {
@@ -340,17 +277,27 @@ public class TpsGate {
     }
 
     /**
-     * Get the admitted TTL in milliseconds.
+     * Get TPS counter for a specific executor (for config wiring).
      */
-    public long getAdmittedTtlMs() {
-        return admittedTtlMs;
+    public SlidingWindowCounter getCounter(String executorId) {
+        return counters.get(executorId);
     }
 
-    /**
-     * Register a callback to be invoked when TPS capacity becomes available
-     * for the given executor (i.e., when entries are evicted from its TPS window).
-     */
-    public void onCapacityAvailable(String executorId, Runnable callback) {
-        capacityCallbacks.put(executorId, callback);
+    private static ConcurrentHashMap<String, SlidingWindowCounter> initCounters(
+            ExecutorHierarchy hierarchy, long windowSizeMs) {
+        ConcurrentHashMap<String, SlidingWindowCounter> map = new ConcurrentHashMap<>();
+        for (String executorId : hierarchy.getAllExecutorIds()) {
+            map.put(executorId, new SlidingWindowCounter(windowSizeMs));
+        }
+        return map;
+    }
+
+    private static ConcurrentHashMap<String, SlidingWindowCounter> initAdmittedSets(
+            ExecutorHierarchy hierarchy, long admittedTtlMs) {
+        ConcurrentHashMap<String, SlidingWindowCounter> map = new ConcurrentHashMap<>();
+        for (String executorId : hierarchy.getAllExecutorIds()) {
+            map.put(executorId, new SlidingWindowCounter(admittedTtlMs));
+        }
+        return map;
     }
 }
