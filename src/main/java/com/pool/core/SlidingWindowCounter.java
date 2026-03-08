@@ -1,4 +1,4 @@
-package com.pool.adapter.executor.tps;
+package com.pool.core;
 
 import lombok.Getter;
 import lombok.Setter;

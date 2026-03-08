@@ -1,16 +1,16 @@
 package com.pool;
 
-import com.pool.adapter.executor.tps.ExecutorHierarchy;
 import com.pool.adapter.executor.tps.TaskQueueManager;
 import com.pool.adapter.executor.tps.TpsGate;
 import com.pool.adapter.executor.tps.TpsPoolExecutor;
 import com.pool.config.*;
+import com.pool.core.SlidingWindowCounter;
 import com.pool.core.TaskContext;
 import com.pool.core.TaskContextFactory;
 import com.pool.exception.TaskRejectedException;
-import com.pool.policy.DefaultPolicyEngine;
 import com.pool.policy.EvaluationResult;
 import com.pool.policy.PolicyEngine;
+import com.pool.policy.PolicyEngineFactory;
 
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -44,7 +44,7 @@ class PoolApplicationTest {
     @BeforeEach
     void setUp() {
         config = createPoolConfig();
-        policyEngine = new DefaultPolicyEngine(config);
+        policyEngine = PolicyEngineFactory.create(config);
         executor = buildExecutor(config, policyEngine);
     }
 
@@ -64,7 +64,7 @@ class PoolApplicationTest {
     private static TaskQueueManager buildQueueManager(ExecutorHierarchy hierarchy, TpsGate tpsGate, ExecutorService threadPool) {
         Map<String, java.util.concurrent.locks.ReentrantLock> locks = new ConcurrentHashMap<>();
         Map<String, java.util.concurrent.locks.Condition> conditions = new ConcurrentHashMap<>();
-        Map<String, com.pool.strategy.PriorityStrategy> strategies = new ConcurrentHashMap<>();
+        Map<String, com.pool.strategy.PriorityStrategy<TaskQueueManager.QueuedTask>> strategies = new ConcurrentHashMap<>();
 
         for (String id : hierarchy.getAllExecutorIds()) {
             java.util.concurrent.locks.ReentrantLock lock = new java.util.concurrent.locks.ReentrantLock();
@@ -74,7 +74,7 @@ class PoolApplicationTest {
             int cap = hierarchy.getQueueCapacity(id);
             strategies.put(id, com.pool.strategy.PriorityStrategyFactory.createDefault(cap <= 0 ? Integer.MAX_VALUE : cap));
 
-            com.pool.adapter.executor.tps.SlidingWindowCounter counter = tpsGate.getCounter(id);
+            SlidingWindowCounter counter = tpsGate.getCounter(id);
             if (counter != null) {
                 final java.util.concurrent.locks.ReentrantLock l = lock;
                 final java.util.concurrent.locks.Condition c = conditions.get(id);

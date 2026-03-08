@@ -1,6 +1,9 @@
 package com.pool.config;
 
-import com.pool.adapter.executor.tps.*;
+import com.pool.adapter.executor.tps.TaskQueueManager;
+import com.pool.adapter.executor.tps.TpsGate;
+import com.pool.adapter.executor.tps.TpsPoolExecutor;
+import com.pool.core.SlidingWindowCounter;
 import com.pool.policy.PolicyEngine;
 import com.pool.variable.DefaultVariableResolver;
 import com.pool.variable.VariableResolver;
@@ -75,7 +78,7 @@ public class TpsSystemConfig {
 
     @Bean
     public TaskQueueManager taskQueueManager(ExecutorHierarchy hierarchy, TpsGate tpsGate) {
-        Map<String, com.pool.strategy.PriorityStrategy> executorStrategies = new ConcurrentHashMap<>();
+        Map<String, com.pool.strategy.PriorityStrategy<TaskQueueManager.QueuedTask>> executorStrategies = new ConcurrentHashMap<>();
 
         for (String executorId : hierarchy.getAllExecutorIds()) {
             int queueCapacity = hierarchy.getQueueCapacity(executorId);

@@ -19,10 +19,10 @@ public class PriorityStrategyFactory {
      * @param capacity Queue capacity
      * @return PriorityStrategy instance
      */
-    public static PriorityStrategy create(StrategyConfig config, int capacity) {
+    public static <T> PriorityStrategy<T> create(StrategyConfig config, int capacity) {
         if (config == null) {
             log.info("No strategy config provided, defaulting to FIFO");
-            return new FIFOStrategy(capacity);
+            return new FIFOStrategy<>(capacity);
         }
 
         StrategyType type = config.getType();
@@ -33,7 +33,7 @@ public class PriorityStrategyFactory {
         log.info("Creating PriorityStrategy: {}", type);
 
         return switch (type) {
-            case FIFO -> new FIFOStrategy(capacity);
+            case FIFO -> new FIFOStrategy<>(capacity);
             case TIME_BASED -> throw new ConfigurationException(
                     "TIME_BASED strategy is not yet implemented. Use FIFO for now.");
             case BUCKET_BASED -> throw new ConfigurationException(
@@ -44,7 +44,7 @@ public class PriorityStrategyFactory {
     /**
      * Create a default FIFO strategy.
      */
-    public static PriorityStrategy createDefault(int capacity) {
-        return new FIFOStrategy(capacity);
+    public static <T> PriorityStrategy<T> createDefault(int capacity) {
+        return new FIFOStrategy<>(capacity);
     }
 }

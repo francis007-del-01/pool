@@ -6,7 +6,6 @@ import com.pool.core.TaskContext;
 import com.pool.priority.PriorityCalculator;
 import com.pool.priority.PriorityKey;
 import com.pool.priority.TreeTraverser;
-import com.pool.variable.DefaultVariableResolver;
 import com.pool.variable.VariableResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,9 +30,9 @@ public class DefaultPolicyEngine implements PolicyEngine {
     private final PriorityCalculator priorityCalculator;
 
     @Autowired
-    public DefaultPolicyEngine(PoolConfig config) {
+    public DefaultPolicyEngine(PoolConfig config, VariableResolver variableResolver) {
         this.config = config;
-        this.variableResolver = new DefaultVariableResolver();
+        this.variableResolver = variableResolver;
         this.expressionEvaluator = new ExpressionEvaluator(variableResolver);
         this.treeTraverser = new TreeTraverser(expressionEvaluator);
         this.priorityCalculator = new PriorityCalculator(variableResolver);

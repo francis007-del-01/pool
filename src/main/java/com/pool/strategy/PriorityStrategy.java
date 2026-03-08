@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit;
  * - TIME_BASED (future): Boost priority based on wait time (aging)
  * - BUCKET_BASED (future): Multi-level buckets with promotion
  */
-public interface PriorityStrategy {
+public interface PriorityStrategy<T> {
 
     /**
      * Get the strategy type name.
@@ -29,7 +29,7 @@ public interface PriorityStrategy {
      * @param task The prioritized task to enqueue
      * @return true if successfully enqueued, false if rejected (e.g., queue full)
      */
-    boolean enqueue(PrioritizedPayload<?> task);
+    boolean enqueue(PrioritizedPayload<T> task);
 
     /**
      * Select and remove the next task to execute (blocking).
@@ -38,14 +38,14 @@ public interface PriorityStrategy {
      * @return The next task to execute
      * @throws InterruptedException if interrupted while waiting
      */
-    PrioritizedPayload<?> takeNext() throws InterruptedException;
+    PrioritizedPayload<T> takeNext() throws InterruptedException;
 
     /**
      * Select and remove the next task to execute (non-blocking).
      *
      * @return The next task, or empty if queue is empty
      */
-    Optional<PrioritizedPayload<?>> pollNext();
+    Optional<PrioritizedPayload<T>> pollNext();
 
     /**
      * Select and remove the next task to execute with timeout.
@@ -56,7 +56,7 @@ public interface PriorityStrategy {
      * @return The next task, or empty if timeout elapsed
      * @throws InterruptedException if interrupted while waiting
      */
-    Optional<PrioritizedPayload<?>> pollNext(long timeout, TimeUnit unit) throws InterruptedException;
+    Optional<PrioritizedPayload<T>> pollNext(long timeout, TimeUnit unit) throws InterruptedException;
 
     /**
      * Get the current queue depth.

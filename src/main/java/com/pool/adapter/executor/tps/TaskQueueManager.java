@@ -1,5 +1,6 @@
 package com.pool.adapter.executor.tps;
 
+import com.pool.config.ExecutorHierarchy;
 import com.pool.core.PrioritizedPayload;
 import com.pool.core.TaskContext;
 import com.pool.exception.TaskRejectedException;
@@ -26,7 +27,7 @@ public class TaskQueueManager {
     private final TpsGate tpsGate;
 
     // Per-executor priority strategies for task ordering and capacity
-    private final Map<String, PriorityStrategy> executorStrategies;
+    private final Map<String, PriorityStrategy<QueuedTask>> executorStrategies;
 
     // Thread pool for execution (unbounded)
     private final ExecutorService threadPool;
@@ -48,7 +49,7 @@ public class TaskQueueManager {
      * Starts drainer threads for each executor.
      */
     public TaskQueueManager(ExecutorHierarchy hierarchy, TpsGate tpsGate,
-                            Map<String, PriorityStrategy> executorStrategies,
+                            Map<String, PriorityStrategy<QueuedTask>> executorStrategies,
                             Map<String, java.util.concurrent.locks.ReentrantLock> capacityLocks,
                             Map<String, java.util.concurrent.locks.Condition> capacityConditions,
                             ExecutorService threadPool) {
@@ -95,7 +96,7 @@ public class TaskQueueManager {
      */
     public void queueTask(Runnable task, String requestId, String executorId,
                            PriorityKey priorityKey, TaskContext context) {
-        PriorityStrategy strategy = executorStrategies.get(executorId);
+        PriorityStrategy<QueuedTask> strategy = executorStrategies.get(executorId);
         if (strategy == null) {
             throw new TaskRejectedException("Unknown executor: " + executorId);
         }
@@ -118,20 +119,19 @@ public class TaskQueueManager {
      * Uses dual-trigger: blocks on queue for new tasks, and wakes on capacity signal.
      */
     private void drainQueue(String executorId) {
-        PriorityStrategy strategy = executorStrategies.get(executorId);
+        PriorityStrategy<QueuedTask> strategy = executorStrategies.get(executorId);
         java.util.concurrent.locks.ReentrantLock lock = capacityLocks.get(executorId);
         java.util.concurrent.locks.Condition capacityAvailable = capacityConditions.get(executorId);
 
         while (!shutdown.get()) {
             try {
                 // Wait for items in queue
-                Optional<PrioritizedPayload<?>> polled = strategy.pollNext(100, TimeUnit.MILLISECONDS);
+                Optional<PrioritizedPayload<QueuedTask>> polled = strategy.pollNext(100, TimeUnit.MILLISECONDS);
                 if (polled.isEmpty()) {
                     continue;
                 }
 
-                @SuppressWarnings("unchecked")
-                QueuedTask task = ((PrioritizedPayload<QueuedTask>) polled.get()).getPayload();
+                QueuedTask task = polled.get().getPayload();
 
                 // Hold the task and wait for capacity instead of re-inserting
                 while (!shutdown.get() && !tpsGate.tryAcquire(task.context(), executorId)) {
@@ -202,7 +202,7 @@ public class TaskQueueManager {
     }
 
     public int getQueueSize(String executorId) {
-        PriorityStrategy strategy = executorStrategies.get(executorId);
+        PriorityStrategy<QueuedTask> strategy = executorStrategies.get(executorId);
         return strategy != null ? strategy.getQueueSize() : 0;
     }
 

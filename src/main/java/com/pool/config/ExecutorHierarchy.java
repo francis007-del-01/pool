@@ -1,7 +1,5 @@
-package com.pool.adapter.executor.tps;
+package com.pool.config;
 
-import com.pool.config.ExecutorSpec;
-import com.pool.config.PoolConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.util.*;

@@ -1,6 +1,7 @@
 package com.pool.adapter.executor.tps;
 
 import com.pool.config.*;
+import com.pool.core.SlidingWindowCounter;
 import com.pool.core.TaskContext;
 import com.pool.core.TaskContextFactory;
 import com.pool.exception.TaskRejectedException;
@@ -36,7 +37,7 @@ class TpsPoolExecutorTest {
             return t;
         });
         TaskQueueManager queueManager = buildQueueManager(hierarchy, tpsGate, threadPool);
-        com.pool.policy.PolicyEngine policyEngine = new com.pool.policy.DefaultPolicyEngine(config);
+        com.pool.policy.PolicyEngine policyEngine = com.pool.policy.PolicyEngineFactory.create(config);
         executor = new TpsPoolExecutor(config, policyEngine, hierarchy, tpsGate, queueManager);
     }
 
@@ -244,7 +245,7 @@ class TpsPoolExecutorTest {
     private static TaskQueueManager buildQueueManager(ExecutorHierarchy hierarchy, TpsGate tpsGate, ExecutorService threadPool) {
         Map<String, java.util.concurrent.locks.ReentrantLock> locks = new ConcurrentHashMap<>();
         Map<String, java.util.concurrent.locks.Condition> conditions = new ConcurrentHashMap<>();
-        Map<String, com.pool.strategy.PriorityStrategy> strategies = new ConcurrentHashMap<>();
+        Map<String, com.pool.strategy.PriorityStrategy<TaskQueueManager.QueuedTask>> strategies = new ConcurrentHashMap<>();
 
         for (String id : hierarchy.getAllExecutorIds()) {
             java.util.concurrent.locks.ReentrantLock lock = new java.util.concurrent.locks.ReentrantLock();
