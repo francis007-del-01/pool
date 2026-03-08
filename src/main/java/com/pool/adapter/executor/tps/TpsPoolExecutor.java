@@ -5,22 +5,20 @@ import com.pool.core.TaskContext;
 import com.pool.exception.TaskRejectedException;
 import com.pool.policy.EvaluationResult;
 import com.pool.policy.PolicyEngine;
-import com.pool.policy.PolicyEngineFactory;
 import com.pool.priority.PriorityKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
 
-import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * TPS-based executor with hierarchical executor support.
- * Replaces DefaultPoolExecutor with TPS-gated admission and unbounded threads.
+ * All dependencies are injected — this class is a thin coordinator.
  */
+@Component
 public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
 
     private static final Logger log = LoggerFactory.getLogger(TpsPoolExecutor.class);
@@ -29,86 +27,26 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
     private final PolicyEngine policyEngine;
     private final ExecutorHierarchy hierarchy;
     private final TpsGate tpsGate;
+    private final TaskQueueManager queueManager;
 
-    // Per-executor queues for priority ordering when TPS limit is hit
-    private final Map<String, PriorityBlockingQueue<QueuedTask>> executorQueues;
-    private final Map<String, AtomicInteger> executorQueueSizes;
-
-    // Thread pool for execution (unbounded)
-    private final ExecutorService threadPool;
-
-    // Queue drainer threads (one per executor)
-    private final Map<String, Thread> drainerThreads;
-
-    // Per-executor locks and conditions for capacity signaling
-    private final Map<String, ReentrantLock> capacityLocks;
-    private final Map<String, Condition> capacityConditions;
-
-    private final AtomicBoolean shutdown = new AtomicBoolean(false);
     private final AtomicInteger submittedCount = new AtomicInteger(0);
-    private final AtomicInteger executedCount = new AtomicInteger(0);
     private final AtomicInteger rejectedCount = new AtomicInteger(0);
-    private final AtomicInteger activeCount = new AtomicInteger(0);
 
-    public TpsPoolExecutor(PoolConfig config) {
+    @Autowired
+    public TpsPoolExecutor(PoolConfig config,
+                           PolicyEngine policyEngine,
+                           ExecutorHierarchy hierarchy,
+                           TpsGate tpsGate,
+                           TaskQueueManager queueManager) {
         this.config = config;
-        this.policyEngine = PolicyEngineFactory.create(config);
-
-        // Build executor hierarchy
-        this.hierarchy = new ExecutorHierarchy(config.executors());
-        this.tpsGate = new TpsGate(hierarchy);
-
-        // Initialize per-executor queues with their own capacities
-        this.executorQueues = new ConcurrentHashMap<>();
-        this.executorQueueSizes = new ConcurrentHashMap<>();
-        for (String executorId : hierarchy.getAllExecutorIds()) {
-            executorQueues.put(executorId, new PriorityBlockingQueue<>(
-                    100, Comparator.comparing(QueuedTask::priorityKey)));
-            executorQueueSizes.put(executorId, new AtomicInteger(0));
-        }
-
-        // Unbounded cached thread pool
-        this.threadPool = Executors.newCachedThreadPool(r -> {
-            Thread t = new Thread(r);
-            t.setName("tps-pool-worker-" + System.nanoTime());
-            t.setDaemon(true);
-            return t;
-        });
-
-        // Initialize per-executor capacity locks and conditions
-        this.capacityLocks = new ConcurrentHashMap<>();
-        this.capacityConditions = new ConcurrentHashMap<>();
-        for (String executorId : hierarchy.getAllExecutorIds()) {
-            ReentrantLock lock = new ReentrantLock();
-            capacityLocks.put(executorId, lock);
-            capacityConditions.put(executorId, lock.newCondition());
-
-            // Register capacity callback: when TPS counter evicts, signal the drainer
-            final String execId = executorId;
-            tpsGate.onCapacityAvailable(executorId, () -> {
-                ReentrantLock l = capacityLocks.get(execId);
-                l.lock();
-                try {
-                    capacityConditions.get(execId).signalAll();
-                } finally {
-                    l.unlock();
-                }
-            });
-        }
-
-        // Start drainer threads for each executor
-        this.drainerThreads = new ConcurrentHashMap<>();
-        for (String executorId : hierarchy.getAllExecutorIds()) {
-            Thread drainer = new Thread(() -> drainQueue(executorId), 
-                    "queue-drainer-" + executorId);
-            drainer.setDaemon(true);
-            drainer.start();
-            drainerThreads.put(executorId, drainer);
-        }
+        this.policyEngine = policyEngine;
+        this.hierarchy = hierarchy;
+        this.tpsGate = tpsGate;
+        this.queueManager = queueManager;
 
         log.info("TpsPoolExecutor initialized: {} with {} executors, root TPS: {}",
-                config.name(),
-                config.executors().size(),
+                config.getName(),
+                config.getExecutors().size(),
                 hierarchy.getTps(hierarchy.getRootId()));
     }
 
@@ -120,14 +58,14 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
         if (task == null) {
             throw new NullPointerException("Task cannot be null");
         }
-        if (shutdown.get()) {
+        if (queueManager.isShutdown()) {
             throw new TaskRejectedException("Executor is shutdown");
         }
 
         // Evaluate priority and get target executor
         EvaluationResult result = policyEngine.evaluate(context);
         String executorId = result.getMatchedPath().executor();
-        
+
         // Use default executor if none specified
         if (executorId == null || executorId.isEmpty()) {
             executorId = hierarchy.getRootId();
@@ -141,14 +79,19 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
         // Try to acquire TPS (uses per-executor identifier field)
         if (tpsGate.tryAcquire(context, executorId)) {
             // Under TPS limit - execute immediately
-            executeTask(task, requestId, executorId);
+            queueManager.executeTask(task, requestId, executorId);
             log.debug("Task {} executed immediately (executor: {}, TPS: {}/{})",
-                    requestId, executorId, 
-                    tpsGate.getCurrentTps(executorId), 
+                    requestId, executorId,
+                    tpsGate.getCurrentTps(executorId),
                     hierarchy.getTps(executorId));
         } else {
             // TPS limit hit - queue the task
-            queueTask(task, requestId, executorId, priorityKey, context);
+            try {
+                queueManager.queueTask(task, requestId, executorId, priorityKey, context);
+            } catch (TaskRejectedException e) {
+                rejectedCount.incrementAndGet();
+                throw e;
+            }
         }
     }
 
@@ -160,16 +103,16 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
         if (task == null) {
             throw new NullPointerException("Task cannot be null");
         }
-        if (shutdown.get()) {
+        if (queueManager.isShutdown()) {
             throw new TaskRejectedException("Executor is shutdown");
         }
 
         FutureTask<T> futureTask = new FutureTask<>(task);
-        
+
         // Evaluate priority and get target executor
         EvaluationResult result = policyEngine.evaluate(context);
         String executorId = result.getMatchedPath().executor();
-        
+
         if (executorId == null || executorId.isEmpty()) {
             executorId = hierarchy.getRootId();
         }
@@ -181,156 +124,61 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
 
         // Try to acquire TPS (uses per-executor identifier field)
         if (tpsGate.tryAcquire(context, executorId)) {
-            executeTask(futureTask, requestId, executorId);
+            queueManager.executeTask(futureTask, requestId, executorId);
         } else {
-            queueTask(futureTask, requestId, executorId, priorityKey, context);
+            try {
+                queueManager.queueTask(futureTask, requestId, executorId, priorityKey, context);
+            } catch (TaskRejectedException e) {
+                rejectedCount.incrementAndGet();
+                throw e;
+            }
         }
 
         return futureTask;
     }
 
-    private void executeTask(Runnable task, String requestId, String executorId) {
-        activeCount.incrementAndGet();
-        
-        threadPool.submit(() -> {
-            try {
-                task.run();
-                executedCount.incrementAndGet();
-            } finally {
-                activeCount.decrementAndGet();
-                // TPS window will auto-expire, no explicit release needed
-            }
-        });
-    }
-
-    private void queueTask(Runnable task, String requestId, String executorId, 
-                           PriorityKey priorityKey, TaskContext context) {
-        PriorityBlockingQueue<QueuedTask> queue = executorQueues.get(executorId);
-        if (queue == null) {
-            rejectedCount.incrementAndGet();
-            throw new TaskRejectedException("Unknown executor: " + executorId);
-        }
-
-        AtomicInteger queueSize = executorQueueSizes.get(executorId);
-        int maxQueueCapacity = hierarchy.getQueueCapacity(executorId);
-        
-        // Check per-executor queue capacity
-        if (maxQueueCapacity > 0 && queueSize.get() >= maxQueueCapacity) {
-            rejectedCount.incrementAndGet();
-            throw new TaskRejectedException("Queue full for executor '" + executorId + 
-                    "' (capacity: " + maxQueueCapacity + "), task rejected: " + requestId);
-        }
-
-        QueuedTask queuedTask = new QueuedTask(task, requestId, executorId, priorityKey, context);
-        queue.offer(queuedTask);
-        queueSize.incrementAndGet();
-        
-        log.debug("Task {} queued for executor '{}' (queue size: {}/{})",
-                requestId, executorId, queueSize.get(), maxQueueCapacity > 0 ? maxQueueCapacity : "unbounded");
-    }
-
-    /**
-     * Drains queued tasks when TPS capacity becomes available.
-     * Uses dual-trigger: blocks on queue for new tasks, and wakes on capacity signal.
-     */
-    private void drainQueue(String executorId) {
-        PriorityBlockingQueue<QueuedTask> queue = executorQueues.get(executorId);
-        ReentrantLock lock = capacityLocks.get(executorId);
-        Condition capacityAvailable = capacityConditions.get(executorId);
-        
-        while (!shutdown.get()) {
-            try {
-                // Wait for items in queue
-                QueuedTask task = queue.poll(100, TimeUnit.MILLISECONDS);
-                if (task == null) {
-                    continue;
-                }
-
-                // Hold the task and wait for capacity instead of re-inserting
-                while (!shutdown.get() && !tpsGate.tryAcquire(task.context(), executorId)) {
-                    // Wait for capacity signal or timeout as safety net
-                    lock.lock();
-                    try {
-                        capacityAvailable.await(tpsGate.getWindowSizeMs(), TimeUnit.MILLISECONDS);
-                    } finally {
-                        lock.unlock();
-                    }
-                }
-
-                if (!shutdown.get()) {
-                    executorQueueSizes.get(executorId).decrementAndGet();
-                    executeTask(task.task(), task.requestId(), executorId);
-                    log.debug("Dequeued and executed task {} for executor '{}'",
-                            task.requestId(), executorId);
-                } else {
-                    // Shutting down — put task back so it's not lost
-                    queue.offer(task);
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-        }
-    }
-
     @Override
     public void shutdown() {
-        log.info("Shutting down TpsPoolExecutor: {}", config.name());
-        shutdown.set(true);
-        
-        // Interrupt drainer threads
-        for (Thread drainer : drainerThreads.values()) {
-            drainer.interrupt();
-        }
-        
-        threadPool.shutdown();
+        log.info("Shutting down TpsPoolExecutor: {}", config.getName());
+        queueManager.shutdown();
     }
 
     @Override
     public void shutdownNow() {
-        log.info("Shutting down TpsPoolExecutor immediately: {}", config.name());
-        shutdown.set(true);
-        
-        for (Thread drainer : drainerThreads.values()) {
-            drainer.interrupt();
-        }
-        
-        threadPool.shutdownNow();
+        log.info("Shutting down TpsPoolExecutor immediately: {}", config.getName());
+        queueManager.shutdownNow();
     }
 
     @Override
     public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
-        return threadPool.awaitTermination(timeout, unit);
+        return queueManager.awaitTermination(timeout, unit);
     }
 
     @Override
     public boolean isShutdown() {
-        return shutdown.get();
+        return queueManager.isShutdown();
     }
 
     @Override
     public boolean isTerminated() {
-        return shutdown.get() && threadPool.isTerminated();
+        return queueManager.isTerminated();
     }
 
     @Override
     public int getQueueSize() {
-        return executorQueueSizes.values().stream()
-                .mapToInt(AtomicInteger::get)
-                .sum();
+        return queueManager.getTotalQueueSize();
     }
 
     @Override
     public int getActiveCount() {
-        return activeCount.get();
+        return queueManager.getActiveCount();
     }
 
     /**
      * Get queue size for a specific executor.
      */
     public int getQueueSize(String executorId) {
-        PriorityBlockingQueue<QueuedTask> queue = executorQueues.get(executorId);
-        return queue != null ? queue.size() : 0;
+        return queueManager.getQueueSize(executorId);
     }
 
     /**
@@ -367,30 +215,13 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
     public TpsExecutorStats getStats() {
         return new TpsExecutorStats(
                 submittedCount.get(),
-                executedCount.get(),
+                queueManager.getExecutedCount(),
                 rejectedCount.get(),
                 getQueueSize(),
-                activeCount.get(),
+                queueManager.getActiveCount(),
                 hierarchy.getTps(hierarchy.getRootId()),
                 tpsGate.getCurrentTps(hierarchy.getRootId())
         );
-    }
-
-    /**
-     * Queued task wrapper with priority key for ordering.
-     */
-    private record QueuedTask(
-            Runnable task,
-            String requestId,
-            String executorId,
-            PriorityKey priorityKey,
-            TaskContext context
-    ) implements Comparable<QueuedTask> {
-        
-        @Override
-        public int compareTo(QueuedTask other) {
-            return this.priorityKey.compareTo(other.priorityKey);
-        }
     }
 
     /**

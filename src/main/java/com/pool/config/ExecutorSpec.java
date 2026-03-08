@@ -1,54 +1,96 @@
 package com.pool.config;
 
+import jakarta.validation.constraints.NotBlank;
+import lombok.Data;
+
 /**
  * Configuration for a TPS-based executor with hierarchical support.
- *
- * @param id                     Unique executor ID
- * @param parent                 Parent executor ID (null for root executor)
- * @param tps                    Max TPS limit (0 or negative means unbounded)
- * @param queueCapacity          Max queue capacity (only applicable for root executor)
- * @param identifierField        Field expression to extract unique identifier for TPS counting (e.g., "$req.ipAddress")
  */
-public record ExecutorSpec(
-        String id,
-        String parent,
-        int tps,
-        int queueCapacity,
-        String identifierField
-) {
+@Data
+public class ExecutorSpec {
+
+    /**
+     * Unique executor ID.
+     */
+    @NotBlank
+    private String id;
+
+    /**
+     * Parent executor ID (null for root executor).
+     */
+    private String parent;
+
+    /**
+     * Max TPS limit (0 or negative means unbounded).
+     */
+    private int tps;
+
+    /**
+     * Max queue capacity (only applicable for root executor).
+     */
+    private int queueCapacity;
+
+    /**
+     * Field expression to extract unique identifier for TPS counting (e.g., "$req.ipAddress").
+     */
+    private String identifierField;
+
     /**
      * Create a root executor with TPS limit and queue capacity.
      */
     public static ExecutorSpec root(String id, int tps, int queueCapacity) {
-        return new ExecutorSpec(id, null, tps, queueCapacity, null);
+        return root(id, tps, queueCapacity, null);
     }
 
     /**
      * Create a root executor with TPS limit, queue capacity, and identifier field.
      */
     public static ExecutorSpec root(String id, int tps, int queueCapacity, String identifierField) {
-        return new ExecutorSpec(id, null, tps, queueCapacity, identifierField);
+        ExecutorSpec spec = new ExecutorSpec();
+        spec.setId(id);
+        spec.setTps(tps);
+        spec.setQueueCapacity(queueCapacity);
+        spec.setIdentifierField(identifierField);
+        return spec;
     }
 
     /**
      * Create a child executor with TPS limit.
      */
     public static ExecutorSpec child(String id, String parent, int tps) {
-        return new ExecutorSpec(id, parent, tps, 0, null);
+        return child(id, parent, tps, null);
     }
 
     /**
      * Create a child executor with TPS limit and identifier field.
      */
     public static ExecutorSpec child(String id, String parent, int tps, String identifierField) {
-        return new ExecutorSpec(id, parent, tps, 0, identifierField);
+        ExecutorSpec spec = new ExecutorSpec();
+        spec.setId(id);
+        spec.setParent(parent);
+        spec.setTps(tps);
+        spec.setIdentifierField(identifierField);
+        return spec;
+    }
+
+    /**
+     * Create a child executor with TPS limit, queue capacity, and identifier field.
+     */
+    public static ExecutorSpec child(String id, String parent, int tps, int queueCapacity, String identifierField) {
+        ExecutorSpec spec = new ExecutorSpec();
+        spec.setId(id);
+        spec.setParent(parent);
+        spec.setTps(tps);
+        spec.setQueueCapacity(queueCapacity);
+        spec.setIdentifierField(identifierField);
+        return spec;
     }
 
     /**
      * Create an unbounded root executor.
      */
     public static ExecutorSpec unboundedRoot(String id, int queueCapacity) {
-        return new ExecutorSpec(id, null, 0, queueCapacity, null);
+        return root(id, 0, queueCapacity);
     }
 
     /**

@@ -55,11 +55,11 @@ public class PriorityCalculator {
             return context.getSubmittedAt();
         }
 
-        Optional<Long> value = variableResolver.resolveAsLong(sortBy.field(), context);
+        Optional<Long> value = variableResolver.resolveAsLong(sortBy.getField(), context);
         
         if (value.isEmpty()) {
             log.warn("Sort-by field '{}' not found or not numeric, using submittedAt as fallback", 
-                    sortBy.field());
+                    sortBy.getField());
             return context.getSubmittedAt();
         }
 
@@ -67,7 +67,7 @@ public class PriorityCalculator {
         
         // Apply direction: DESC means higher value = higher priority
         // We negate for DESC so that higher values become lower (since lower = higher priority)
-        if (sortBy.direction() == SortDirection.DESC) {
+        if (sortBy.getDirection() == SortDirection.DESC) {
             return -rawValue;
         }
         

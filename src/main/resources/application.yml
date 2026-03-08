@@ -1,4 +1,11 @@
+# Logging
+logging:
+  level:
+    com.pool: DEBUG
+
+# Pool Configuration
 pool:
+  enabled: true
   name: "example-pool"
   version: "1.0"
 
@@ -7,30 +14,29 @@ pool:
     executors:
       # Root executor - overall TPS budget
       - id: "main"
-        tps: 1000                           # Max 1000 unique requests/sec total
-        queue_capacity: 5000                # Queue for tasks hitting main's TPS limit
-        identifier_field: "$req.requestId"  # Count by request ID
+        tps: 1000
+        queue-capacity: 5000
+        identifier-field: "$req.requestId"
 
       # Child executor for fast/VIP traffic
       - id: "fast"
         parent: "main"
-        tps: 500                            # Max 500 unique requests/sec for fast
-        queue_capacity: 2000                # Queue for fast executor
-        identifier_field: "$req.requestId"
+        tps: 500
+        queue-capacity: 2000
+        identifier-field: "$req.requestId"
 
-      # Child executor for bulk traffic  
+      # Child executor for bulk traffic
       - id: "bulk"
         parent: "main"
-        tps: 300                            # Max 300 unique requests/sec for bulk
-        queue_capacity: 1000                # Queue for bulk executor
-        identifier_field: "$req.requestId"
+        tps: 300
+        queue-capacity: 1000
+        identifier-field: "$req.requestId"
 
   # Priority Strategy Configuration
   priority-strategy:
     type: FIFO
 
   # Priority tree - routes tasks to executors at leaf nodes
-  # Uses unified syntax: condition is an expression string with nested-levels
   priority-tree:
     # Level 1: Region-based routing
     - name: "L1.NORTH_AMERICA"
@@ -46,7 +52,7 @@ pool:
               sort-by:
                 field: $req.priority
                 direction: DESC
-              executor: "fast"  # Route to fast executor
+              executor: "fast"
 
             - name: "L3.DEFAULT"
               condition: "true"
@@ -73,7 +79,7 @@ pool:
               sort-by:
                 field: $sys.submittedAt
                 direction: ASC
-              executor: "bulk"  # Route to bulk executor
+              executor: "bulk"
 
     - name: "L1.EUROPE"
       condition: '$req.region == "EUROPE"'
@@ -100,4 +106,4 @@ pool:
               sort-by:
                 field: $sys.submittedAt
                 direction: ASC
-              executor: "bulk"  # Default to bulk executor
+              executor: "bulk"

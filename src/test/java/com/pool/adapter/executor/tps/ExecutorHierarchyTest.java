@@ -140,7 +140,7 @@ class ExecutorHierarchyTest {
     @Test
     @DisplayName("Should reject null or empty specs")
     void shouldRejectNullSpecs() {
-        assertThrows(IllegalArgumentException.class, () -> new ExecutorHierarchy(null));
+        assertThrows(IllegalArgumentException.class, () -> new ExecutorHierarchy((List<ExecutorSpec>) null));
         assertThrows(IllegalArgumentException.class, () -> new ExecutorHierarchy(List.of()));
     }
 
@@ -149,7 +149,7 @@ class ExecutorHierarchyTest {
     void shouldRejectDuplicateIds() {
         List<ExecutorSpec> specs = List.of(
                 ExecutorSpec.root("main", 1000, 5000),
-                new ExecutorSpec("main", null, 500, 0, null) // Duplicate
+                ExecutorSpec.root("main", 500, 0) // Duplicate
         );
 
         assertThrows(IllegalArgumentException.class, () -> new ExecutorHierarchy(specs));

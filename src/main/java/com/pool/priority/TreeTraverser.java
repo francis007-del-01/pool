@@ -90,11 +90,11 @@ public class TreeTraverser {
             int branchIndex = i + 1; // 1-based index
 
             // Evaluate condition expression
-            String expression = node.condition();
+            String expression = node.getCondition();
             boolean matches = expressionEvaluator.evaluate(expression, context);
 
             log.trace("Level {}, Node {} '{}': expression '{}' = {}", 
-                    level, branchIndex, node.name(), expression, matches);
+                    level, branchIndex, node.getName(), expression, matches);
 
             if (!matches) {
                 continue; // Try next sibling
@@ -103,23 +103,23 @@ public class TreeTraverser {
             // Condition matched - check if this is a leaf or has children
             if (node.isLeaf()) {
                 // Leaf node - we have a complete match
-                path.add(new MatchedNode(node.name(), branchIndex));
-                return new LeafResult(node.getEffectiveSortBy(), node.executor());
+                path.add(new MatchedNode(node.getName(), branchIndex));
+                return new LeafResult(node.getEffectiveSortBy(), node.getExecutor());
             }
 
             // Non-leaf node - try to match children
             LeafResult childResult = traverseRecursive(
-                    node.nestedLevels(), context, path, level + 1);
+                    node.getNestedLevels(), context, path, level + 1);
 
             if (childResult != null) {
                 // Child matched - add this node to path and return
-                path.add(0, new MatchedNode(node.name(), branchIndex)); // Insert at beginning
+                path.add(0, new MatchedNode(node.getName(), branchIndex)); // Insert at beginning
                 return childResult;
             }
 
             // No child matched - reject this branch and try next sibling
             log.trace("Level {}, Node '{}': matched but no child matched, trying next sibling", 
-                    level, node.name());
+                    level, node.getName());
         }
 
         // No match found at this level

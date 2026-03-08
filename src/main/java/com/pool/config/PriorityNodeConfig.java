@@ -1,23 +1,40 @@
 package com.pool.config;
 
+import lombok.Data;
+
 import java.util.List;
 
 /**
  * Configuration for a node in the priority tree.
- *
- * @param name         Node name (e.g., "L1.NORTH_AMERICA", "L2.PLATINUM")
- * @param condition    Condition expression string (e.g., '$req.region == "US"')
- * @param nestedLevels Child nodes (null or empty = leaf node)
- * @param sortBy       Sort-by directive (only valid on leaf nodes)
- * @param executor     Target executor ID for TPS-based routing (only valid on leaf nodes)
  */
-public record PriorityNodeConfig(
-        String name,
-        String condition,
-        List<PriorityNodeConfig> nestedLevels,
-        SortByConfig sortBy,
-        String executor
-) {
+@Data
+public class PriorityNodeConfig {
+
+    /**
+     * Node name (e.g., "L1.NORTH_AMERICA", "L2.PLATINUM").
+     */
+    private String name;
+
+    /**
+     * Condition expression string (e.g., '$req.region == "US"').
+     */
+    private String condition = "true";
+
+    /**
+     * Child nodes (null or empty = leaf node).
+     */
+    private List<PriorityNodeConfig> nestedLevels;
+
+    /**
+     * Sort-by directive (only valid on leaf nodes).
+     */
+    private SortByConfig sortBy;
+
+    /**
+     * Target executor ID for TPS-based routing (only valid on leaf nodes).
+     */
+    private String executor;
+
     /**
      * Check if this node is a leaf (no nested levels).
      */

@@ -1,8 +1,11 @@
 package com.pool.adapter.executor.tps;
 
 import com.pool.config.ExecutorSpec;
+import com.pool.config.PoolConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
 
 import java.util.*;
 
@@ -10,6 +13,7 @@ import java.util.*;
  * Manages hierarchical executor relationships (parent-child).
  * Validates configuration and provides traversal methods.
  */
+@Component
 public class ExecutorHierarchy {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutorHierarchy.class);
@@ -17,6 +21,11 @@ public class ExecutorHierarchy {
     private final Map<String, ExecutorSpec> executors;
     private final Map<String, List<String>> children; // parent -> children
     private final String rootId;
+
+    @Autowired
+    public ExecutorHierarchy(PoolConfig config) {
+        this(config.getExecutors());
+    }
 
     public ExecutorHierarchy(List<ExecutorSpec> specs) {
         if (specs == null || specs.isEmpty()) {
@@ -28,36 +37,36 @@ public class ExecutorHierarchy {
 
         // Build executor map
         for (ExecutorSpec spec : specs) {
-            if (spec.id() == null || spec.id().isEmpty()) {
+            if (spec.getId() == null || spec.getId().isEmpty()) {
                 throw new IllegalArgumentException("Executor ID cannot be null or empty");
             }
-            if (executors.containsKey(spec.id())) {
-                throw new IllegalArgumentException("Duplicate executor ID: " + spec.id());
+            if (executors.containsKey(spec.getId())) {
+                throw new IllegalArgumentException("Duplicate executor ID: " + spec.getId());
             }
-            executors.put(spec.id(), spec);
+            executors.put(spec.getId(), spec);
         }
 
         // Validate and build hierarchy
         String foundRoot = null;
         for (ExecutorSpec spec : specs) {
-            String parentId = spec.parent();
+            String parentId = spec.getParent();
             
             if (parentId == null || parentId.isEmpty()) {
                 // This is a root executor
                 if (foundRoot != null) {
                     throw new IllegalArgumentException(
-                            "Multiple root executors found: '" + foundRoot + "' and '" + spec.id() + "'");
+                            "Multiple root executors found: '" + foundRoot + "' and '" + spec.getId() + "'");
                 }
-                foundRoot = spec.id();
+                foundRoot = spec.getId();
             } else {
                 // Validate parent exists
                 if (!executors.containsKey(parentId)) {
                     throw new IllegalArgumentException(
-                            "Executor '" + spec.id() + "' references unknown parent '" + parentId + "'");
+                            "Executor '" + spec.getId() + "' references unknown parent '" + parentId + "'");
                 }
                 
                 // Add to children map
-                children.computeIfAbsent(parentId, k -> new ArrayList<>()).add(spec.id());
+                children.computeIfAbsent(parentId, k -> new ArrayList<>()).add(spec.getId());
             }
         }
 
@@ -94,7 +103,7 @@ public class ExecutorHierarchy {
             if (spec == null) {
                 throw new IllegalArgumentException("Unknown executor: " + current);
             }
-            current = spec.parent();
+            current = spec.getParent();
         }
         
         return chain;
@@ -112,7 +121,7 @@ public class ExecutorHierarchy {
      */
     public int getTps(String executorId) {
         ExecutorSpec spec = executors.get(executorId);
-        return spec != null ? spec.tps() : 0;
+        return spec != null ? spec.getTps() : 0;
     }
 
     /**
@@ -121,7 +130,7 @@ public class ExecutorHierarchy {
      */
     public String getIdentifierField(String executorId) {
         ExecutorSpec spec = executors.get(executorId);
-        return spec != null ? spec.identifierField() : null;
+        return spec != null ? spec.getIdentifierField() : null;
     }
 
     /**
@@ -164,7 +173,7 @@ public class ExecutorHierarchy {
      */
     public String getParent(String executorId) {
         ExecutorSpec spec = executors.get(executorId);
-        return spec != null ? spec.parent() : null;
+        return spec != null ? spec.getParent() : null;
     }
 
     /**
@@ -173,7 +182,7 @@ public class ExecutorHierarchy {
      */
     public int getQueueCapacity(String executorId) {
         ExecutorSpec spec = executors.get(executorId);
-        return spec != null ? spec.queueCapacity() : 0;
+        return spec != null ? spec.getQueueCapacity() : 0;
     }
 
     /**
@@ -240,15 +249,15 @@ public class ExecutorHierarchy {
 
     private void validateTpsConstraints() {
         for (ExecutorSpec spec : executors.values()) {
-            if (spec.parent() != null && !spec.parent().isEmpty()) {
-                ExecutorSpec parent = executors.get(spec.parent());
+            if (spec.getParent() != null && !spec.getParent().isEmpty()) {
+                ExecutorSpec parent = executors.get(spec.getParent());
                 
                 // If parent has TPS limit and child has TPS limit
-                if (parent != null && parent.tps() > 0 && spec.tps() > 0) {
-                    if (spec.tps() > parent.tps()) {
+                if (parent != null && parent.getTps() > 0 && spec.getTps() > 0) {
+                    if (spec.getTps() > parent.getTps()) {
                         throw new IllegalArgumentException(
-                                "Child executor '" + spec.id() + "' TPS (" + spec.tps() + 
-                                ") cannot exceed parent '" + parent.id() + "' TPS (" + parent.tps() + ")");
+                                "Child executor '" + spec.getId() + "' TPS (" + spec.getTps() + 
+                                ") cannot exceed parent '" + parent.getId() + "' TPS (" + parent.getTps() + ")");
                     }
                 }
             }

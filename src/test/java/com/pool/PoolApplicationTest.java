@@ -1,13 +1,17 @@
 package com.pool;
 
+import com.pool.adapter.executor.tps.ExecutorHierarchy;
+import com.pool.adapter.executor.tps.TaskQueueManager;
+import com.pool.adapter.executor.tps.TpsGate;
 import com.pool.adapter.executor.tps.TpsPoolExecutor;
 import com.pool.config.*;
 import com.pool.core.TaskContext;
 import com.pool.core.TaskContextFactory;
 import com.pool.exception.TaskRejectedException;
+import com.pool.policy.DefaultPolicyEngine;
 import com.pool.policy.EvaluationResult;
 import com.pool.policy.PolicyEngine;
-import com.pool.policy.PolicyEngineFactory;
+
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -42,8 +46,21 @@ class PoolApplicationTest {
     @BeforeEach
     void setUp() {
         config = createPoolConfig();
-        executor = new TpsPoolExecutor(config);
-        policyEngine = PolicyEngineFactory.create(config);
+        policyEngine = new DefaultPolicyEngine(config);
+        executor = buildExecutor(config, policyEngine);
+    }
+
+    private static TpsPoolExecutor buildExecutor(PoolConfig config, PolicyEngine policyEngine) {
+        ExecutorHierarchy hierarchy = new ExecutorHierarchy(config.getExecutors());
+        TpsGate tpsGate = new TpsGate(hierarchy);
+        java.util.concurrent.ExecutorService threadPool = java.util.concurrent.Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r);
+            t.setName("test-pool-worker-" + System.nanoTime());
+            t.setDaemon(true);
+            return t;
+        });
+        TaskQueueManager queueManager = new TaskQueueManager(hierarchy, tpsGate, threadPool);
+        return new TpsPoolExecutor(config, policyEngine, hierarchy, tpsGate, queueManager);
     }
 
     @AfterEach
@@ -489,134 +506,90 @@ class PoolApplicationTest {
 
     private PoolConfig createPoolConfig() {
         // Create executors matching pool.yaml
-        List<ExecutorSpec> executors = List.of(
+        List<ExecutorSpec> executors = new ArrayList<>(List.of(
                 ExecutorSpec.root("main", 1000, 5000, "$req.requestId"),
-                new ExecutorSpec("fast", "main", 500, 2000, "$req.requestId"),
-                new ExecutorSpec("bulk", "main", 300, 1000, "$req.requestId")
-        );
+                ExecutorSpec.child("fast", "main", 500, 2000, "$req.requestId"),
+                ExecutorSpec.child("bulk", "main", 300, 1000, "$req.requestId")
+        ));
 
         // Create priority tree matching pool.yaml
-        List<PriorityNodeConfig> priorityTree = List.of(
+        List<PriorityNodeConfig> priorityTree = new ArrayList<>(List.of(
                 // L1.NORTH_AMERICA
-                new PriorityNodeConfig(
-                        "L1.NORTH_AMERICA",
-                        "$req.region == \"NORTH_AMERICA\"",
-                        List.of(
+                node("L1.NORTH_AMERICA", "$req.region == \"NORTH_AMERICA\"", null, null,
+                        new ArrayList<>(List.of(
                                 // L2.PLATINUM
-                                new PriorityNodeConfig(
-                                        "L2.PLATINUM",
-                                        "$req.customerTier == \"PLATINUM\"",
-                                        List.of(
-                                                new PriorityNodeConfig(
-                                                        "L3.HIGH_VALUE",
-                                                        "$req.transactionAmount > 100000",
-                                                        null,
-                                                        new SortByConfig("$req.priority", SortDirection.DESC),
-                                                        "fast"
-                                                ),
-                                                new PriorityNodeConfig(
-                                                        "L3.DEFAULT",
-                                                        "true",
-                                                        null,
-                                                        new SortByConfig("$req.urgency", SortDirection.DESC),
-                                                        "fast"
-                                                )
-                                        ),
-                                        null,
-                                        null
-                                ),
+                                node("L2.PLATINUM", "$req.customerTier == \"PLATINUM\"", null, null,
+                                        new ArrayList<>(List.of(
+                                                leaf("L3.HIGH_VALUE", "$req.transactionAmount > 100000",
+                                                        sortBy("$req.priority", SortDirection.DESC), "fast"),
+                                                leaf("L3.DEFAULT", "true",
+                                                        sortBy("$req.urgency", SortDirection.DESC), "fast")
+                                        ))),
                                 // L2.GOLD
-                                new PriorityNodeConfig(
-                                        "L2.GOLD",
-                                        "$req.customerTier == \"GOLD\"",
-                                        List.of(
-                                                new PriorityNodeConfig(
-                                                        "L3.DEFAULT",
-                                                        "true",
-                                                        null,
-                                                        SortByConfig.fifo(),
-                                                        "fast"
-                                                )
-                                        ),
-                                        null,
-                                        null
-                                ),
+                                node("L2.GOLD", "$req.customerTier == \"GOLD\"", null, null,
+                                        new ArrayList<>(List.of(
+                                                leaf("L3.DEFAULT", "true", SortByConfig.fifo(), "fast")
+                                        ))),
                                 // L2.DEFAULT
-                                new PriorityNodeConfig(
-                                        "L2.DEFAULT",
-                                        "true",
-                                        List.of(
-                                                new PriorityNodeConfig(
-                                                        "L3.DEFAULT",
-                                                        "true",
-                                                        null,
-                                                        SortByConfig.fifo(),
-                                                        "bulk"
-                                                )
-                                        ),
-                                        null,
-                                        null
-                                )
-                        ),
-                        null,
-                        null
-                ),
+                                node("L2.DEFAULT", "true", null, null,
+                                        new ArrayList<>(List.of(
+                                                leaf("L3.DEFAULT", "true", SortByConfig.fifo(), "bulk")
+                                        )))
+                        ))),
                 // L1.EUROPE
-                new PriorityNodeConfig(
-                        "L1.EUROPE",
-                        "$req.region == \"EUROPE\"",
-                        List.of(
-                                new PriorityNodeConfig(
-                                        "L2.DEFAULT",
-                                        "true",
-                                        List.of(
-                                                new PriorityNodeConfig(
-                                                        "L3.DEFAULT",
-                                                        "true",
-                                                        null,
-                                                        new SortByConfig("$req.priority", SortDirection.DESC),
-                                                        "fast"
-                                                )
-                                        ),
-                                        null,
-                                        null
-                                )
-                        ),
-                        null,
-                        null
-                ),
+                node("L1.EUROPE", "$req.region == \"EUROPE\"", null, null,
+                        new ArrayList<>(List.of(
+                                node("L2.DEFAULT", "true", null, null,
+                                        new ArrayList<>(List.of(
+                                                leaf("L3.DEFAULT", "true",
+                                                        sortBy("$req.priority", SortDirection.DESC), "fast")
+                                        )))
+                        ))),
                 // L1.DEFAULT
-                new PriorityNodeConfig(
-                        "L1.DEFAULT",
-                        "true",
-                        List.of(
-                                new PriorityNodeConfig(
-                                        "L2.DEFAULT",
-                                        "true",
-                                        List.of(
-                                                new PriorityNodeConfig(
-                                                        "L3.DEFAULT",
-                                                        "true",
-                                                        null,
-                                                        SortByConfig.fifo(),
-                                                        "bulk"
-                                                )
-                                        ),
-                                        null,
-                                        null
-                                )
-                        ),
-                        null,
-                        null
-                )
-        );
+                node("L1.DEFAULT", "true", null, null,
+                        new ArrayList<>(List.of(
+                                node("L2.DEFAULT", "true", null, null,
+                                        new ArrayList<>(List.of(
+                                                leaf("L3.DEFAULT", "true", SortByConfig.fifo(), "bulk")
+                                        )))
+                        )))
+        ));
 
-        return new PoolConfig(
-                "test-pool",
-                "1.0",
-                executors,
-                priorityTree,
-                StrategyConfig.fifo()
-        );
+        PoolConfig config = new PoolConfig();
+        config.setName("test-pool");
+        config.setVersion("1.0");
+        AdaptersConfig adapters = new AdaptersConfig();
+        adapters.setExecutors(executors);
+        config.setAdapters(adapters);
+        config.setPriorityTree(priorityTree);
+        config.setPriorityStrategy(StrategyConfig.fifo());
+        return config;
+    }
+
+    private static PriorityNodeConfig leaf(String name, String condition, SortByConfig sortBy, String executor) {
+        PriorityNodeConfig node = new PriorityNodeConfig();
+        node.setName(name);
+        node.setCondition(condition);
+        node.setSortBy(sortBy);
+        node.setExecutor(executor);
+        return node;
+    }
+
+    private static PriorityNodeConfig node(String name, String condition, SortByConfig sortBy, String executor,
+                                           List<PriorityNodeConfig> nested) {
+        PriorityNodeConfig n = new PriorityNodeConfig();
+        n.setName(name);
+        n.setCondition(condition);
+        n.setSortBy(sortBy);
+        n.setExecutor(executor);
+        n.setNestedLevels(nested);
+        return n;
+    }
+
+    private static SortByConfig sortBy(String field, SortDirection direction) {
+        SortByConfig sb = new SortByConfig();
+        sb.setField(field);
+        sb.setDirection(direction);
+        return sb;
     }
 }

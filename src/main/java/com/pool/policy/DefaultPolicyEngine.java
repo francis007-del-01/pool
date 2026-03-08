@@ -10,6 +10,8 @@ import com.pool.variable.DefaultVariableResolver;
 import com.pool.variable.VariableResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
 
 import java.util.Optional;
 
@@ -17,6 +19,7 @@ import java.util.Optional;
  * Default implementation of PolicyEngine.
  * Evaluates the priority tree and calculates task priority at submission time.
  */
+@Component
 public class DefaultPolicyEngine implements PolicyEngine {
 
     private static final Logger log = LoggerFactory.getLogger(DefaultPolicyEngine.class);
@@ -27,6 +30,7 @@ public class DefaultPolicyEngine implements PolicyEngine {
     private final TreeTraverser treeTraverser;
     private final PriorityCalculator priorityCalculator;
 
+    @Autowired
     public DefaultPolicyEngine(PoolConfig config) {
         this.config = config;
         this.variableResolver = new DefaultVariableResolver();
@@ -34,7 +38,7 @@ public class DefaultPolicyEngine implements PolicyEngine {
         this.treeTraverser = new TreeTraverser(expressionEvaluator);
         this.priorityCalculator = new PriorityCalculator(variableResolver);
         
-        log.info("PolicyEngine initialized with config: {} v{}", config.name(), config.version());
+        log.info("PolicyEngine initialized with config: {} v{}", config.getName(), config.getVersion());
     }
 
     @Override
@@ -43,7 +47,7 @@ public class DefaultPolicyEngine implements PolicyEngine {
 
         // Traverse the priority tree to find matching path
         Optional<MatchedPath> matchedPath = treeTraverser.traverse(
-                config.priorityTree(), context);
+                config.getPriorityTree(), context);
 
         // Calculate priority key
         PriorityKey priorityKey;
@@ -77,7 +81,7 @@ public class DefaultPolicyEngine implements PolicyEngine {
      */
     public void updateConfig(PoolConfig newConfig) {
         this.config = newConfig;
-        log.info("PolicyEngine config updated to: {} v{}", newConfig.name(), newConfig.version());
+        log.info("PolicyEngine config updated to: {} v{}", newConfig.getName(), newConfig.getVersion());
     }
 
     /**

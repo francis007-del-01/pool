@@ -5,6 +5,8 @@ import com.pool.variable.DefaultVariableResolver;
 import com.pool.variable.VariableResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -13,6 +15,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * TPS-based admission control gate.
  * Manages TPS limits for hierarchical executors.
  */
+@Component
 public class TpsGate {
 
     private static final Logger log = LoggerFactory.getLogger(TpsGate.class);
@@ -35,6 +38,7 @@ public class TpsGate {
     // Per-executor capacity callbacks — fired when TPS counter evicts entries
     private final ConcurrentHashMap<String, Runnable> capacityCallbacks;
 
+    @Autowired
     public TpsGate(ExecutorHierarchy hierarchy) {
         this(hierarchy, 1000); // Default 1 second window
     }

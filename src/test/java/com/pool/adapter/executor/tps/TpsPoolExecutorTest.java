@@ -29,7 +29,17 @@ class TpsPoolExecutorTest {
     @BeforeEach
     void setUp() {
         config = createTestConfig();
-        executor = new TpsPoolExecutor(config);
+        ExecutorHierarchy hierarchy = new ExecutorHierarchy(config.getExecutors());
+        TpsGate tpsGate = new TpsGate(hierarchy);
+        java.util.concurrent.ExecutorService threadPool = java.util.concurrent.Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r);
+            t.setName("test-pool-worker-" + System.nanoTime());
+            t.setDaemon(true);
+            return t;
+        });
+        TaskQueueManager queueManager = new TaskQueueManager(hierarchy, tpsGate, threadPool);
+        com.pool.policy.PolicyEngine policyEngine = new com.pool.policy.DefaultPolicyEngine(config);
+        executor = new TpsPoolExecutor(config, policyEngine, hierarchy, tpsGate, queueManager);
     }
 
     @AfterEach
@@ -40,36 +50,33 @@ class TpsPoolExecutorTest {
     }
 
     private PoolConfig createTestConfig() {
-        List<ExecutorSpec> executors = List.of(
-                ExecutorSpec.root("main", 100, 50),  // 100 TPS, 50 queue capacity
+        List<ExecutorSpec> executors = new ArrayList<>(List.of(
+                ExecutorSpec.root("main", 100, 50),
                 ExecutorSpec.child("vip", "main", 50),
                 ExecutorSpec.child("bulk", "main", 30)
-        );
+        ));
 
-        List<PriorityNodeConfig> priorityTree = List.of(
-                new PriorityNodeConfig(
-                        "VIP",
-                        "$req.tier == \"VIP\"",
-                        null,
-                        SortByConfig.fifo(),
-                        "vip"
-                ),
-                new PriorityNodeConfig(
-                        "DEFAULT",
-                        "true",
-                        null,
-                        SortByConfig.fifo(),
-                        "main"
-                )
-        );
+        PriorityNodeConfig vipNode = new PriorityNodeConfig();
+        vipNode.setName("VIP");
+        vipNode.setCondition("$req.tier == \"VIP\"");
+        vipNode.setSortBy(SortByConfig.fifo());
+        vipNode.setExecutor("vip");
 
-        return new PoolConfig(
-                "test-pool",
-                "1.0",
-                executors,
-                priorityTree,
-                StrategyConfig.fifo()
-        );
+        PriorityNodeConfig defaultNode = new PriorityNodeConfig();
+        defaultNode.setName("DEFAULT");
+        defaultNode.setCondition("true");
+        defaultNode.setSortBy(SortByConfig.fifo());
+        defaultNode.setExecutor("main");
+
+        PoolConfig config = new PoolConfig();
+        config.setName("test-pool");
+        config.setVersion("1.0");
+        AdaptersConfig adapters = new AdaptersConfig();
+        adapters.setExecutors(executors);
+        config.setAdapters(adapters);
+        config.setPriorityTree(new ArrayList<>(List.of(vipNode, defaultNode)));
+        config.setPriorityStrategy(StrategyConfig.fifo());
+        return config;
     }
 
     @Test
