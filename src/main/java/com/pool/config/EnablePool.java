@@ -1,4 +1,4 @@
-package com.pool.adapter.spring;
+package com.pool.config;
 
 import org.springframework.context.annotation.Import;
 

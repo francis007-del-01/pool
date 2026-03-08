@@ -4,7 +4,7 @@ import com.pool.adapter.executor.PoolExecutor;
 import com.pool.adapter.executor.tps.TpsPoolExecutor;
 import com.pool.core.TaskContext;
 import com.pool.core.TaskContextFactory;
-import com.pool.adapter.spring.EnablePool;
+import com.pool.config.EnablePool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
