@@ -11,6 +11,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * TPS-based admission control gate.
@@ -43,6 +44,7 @@ public class TpsGate {
     // re-counting long-running requests that need additional threads after their
     // TPS window has expired.
     private final ConcurrentHashMap<String, SlidingWindowCounter> admittedIds;
+    private final ReentrantLock acquireLock = new ReentrantLock();
     /**
      * -- GETTER --
      *  Get the admitted TTL in milliseconds.
@@ -121,50 +123,54 @@ public class TpsGate {
 
         // Get the executor chain (self + ancestors)
         List<String> chain = hierarchy.getExecutorChain(executorId);
-        
-        // For each executor in chain, check capacity and try to add identifier
-        // If identifier already exists in window, it's allowed (already counted)
-        // If identifier is new, check capacity first
-        for (String execId : chain) {
-            String execIdentifier = resolveIdentifier(context, execId);
-            SlidingWindowCounter counter = counters.get(execId);
-            
-            if (counter == null) {
-                continue;
+
+        acquireLock.lock();
+        try {
+            // For each executor in chain, check capacity and try to add identifier
+            // If identifier already exists in window, it's allowed (already counted)
+            // If identifier is new, check capacity first
+            for (String execId : chain) {
+                String execIdentifier = resolveIdentifier(context, execId);
+                SlidingWindowCounter counter = counters.get(execId);
+
+                if (counter == null) {
+                    continue;
+                }
+
+                // If identifier already in window, allow it (no new slot needed)
+                if (counter.contains(execIdentifier)) {
+                    log.debug("Identifier '{}' already in window for executor '{}', allowing",
+                            execIdentifier, execId);
+                    continue;
+                }
+
+                // New identifier - check if we have capacity
+                if (!hasCapacity(execId)) {
+                    log.debug("TPS limit reached for executor '{}', rejecting new identifier '{}'",
+                            execId, execIdentifier);
+                    return false;
+                }
             }
-            
-            // If identifier already in window, allow it (no new slot needed)
-            if (counter.contains(execIdentifier)) {
-                log.debug("Identifier '{}' already in window for executor '{}', allowing", 
-                        execIdentifier, execId);
-                continue;
+
+            // All have capacity or identifier already exists, add new identifiers
+            for (String execId : chain) {
+                String execIdentifier = resolveIdentifier(context, execId);
+                SlidingWindowCounter counter = counters.get(execId);
+                if (counter != null) {
+                    counter.tryAdd(execIdentifier);
+                }
             }
-            
-            // New identifier - check if we have capacity
-            if (!hasCapacity(execId)) {
-                log.debug("TPS limit reached for executor '{}', rejecting new identifier '{}'", 
-                        execId, execIdentifier);
-                return false;
+
+            // Mark task as admitted for this executor
+            if (admittedSet != null) {
+                admittedSet.add(taskId);
             }
+
+            log.debug("Request acquired and admitted for executor '{}' (chain: {})", executorId, chain);
+            return true;
+        } finally {
+            acquireLock.unlock();
         }
-        
-        // All have capacity or identifier already exists, add new identifiers
-        for (String execId : chain) {
-            String execIdentifier = resolveIdentifier(context, execId);
-            SlidingWindowCounter counter = counters.get(execId);
-            if (counter != null) {
-                // tryAdd only adds if not already present
-                counter.tryAdd(execIdentifier);
-            }
-        }
-        
-        // Mark task as admitted for this executor
-        if (admittedSet != null) {
-            admittedSet.add(taskId);
-        }
-        
-        log.debug("Request acquired and admitted for executor '{}' (chain: {})", executorId, chain);
-        return true;
     }
 
     /**
