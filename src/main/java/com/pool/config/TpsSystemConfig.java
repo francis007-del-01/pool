@@ -82,9 +82,6 @@ public class TpsSystemConfig {
 
         for (String executorId : hierarchy.getAllExecutorIds()) {
             int queueCapacity = hierarchy.getQueueCapacity(executorId);
-            if (queueCapacity <= 0) {
-                queueCapacity = Integer.MAX_VALUE;
-            }
             executorStrategies.put(executorId,
                     com.pool.strategy.PriorityStrategyFactory.createDefault(queueCapacity));
         }

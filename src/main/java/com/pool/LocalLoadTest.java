@@ -49,6 +49,8 @@ public class LocalLoadTest {
         run("LT-09  Expression throughput — 5000 policy evaluations",     LocalLoadTest::lt09);
         run("LT-10  Mixed workload — 600 tasks, all regions/tiers",       LocalLoadTest::lt10);
         run("LT-11  Graceful shutdown — drain before terminate",          LocalLoadTest::lt11);
+        run("LT-12  Scheduling latency — avg time from submit() to task start", LocalLoadTest::lt12);
+        run("LT-13  Priority correctness — full ordering across all tree levels", LocalLoadTest::lt13);
 
         printTable();
     }
@@ -502,6 +504,212 @@ public class LocalLoadTest {
     }
 
     // -----------------------------------------------------------------------
+    // SCENARIO 12 — Scheduling latency
+    // Measures: time from submit() call → task lambda starts executing.
+    // This covers: policy eval + TPS gate + thread dispatch.
+    // Tested under two conditions:
+    //   A) No TPS pressure  — immediate execution path
+    //   B) Under TPS pressure — queued path (drainer picks up)
+    // -----------------------------------------------------------------------
+    static void lt12(String scenario) throws Exception {
+        int WARMUP = 200, SAMPLES = 1000;
+
+        // ── PATH A: immediate execution (TPS=unbounded, no queuing) ──────────
+        {
+            var exec = buildExecutor(makeConfig(100_000, 50_000, 50_000));
+            try {
+                // warmup
+                var wlatch = new CountDownLatch(WARMUP);
+                for (int i = 0; i < WARMUP; i++) {
+                    exec.submit(ctx("NORTH_AMERICA", "GOLD", 5000, 1), wlatch::countDown);
+                }
+                wlatch.await(10, TimeUnit.SECONDS);
+
+                // measure
+                long[] latencies = new long[SAMPLES];
+                var latch = new CountDownLatch(SAMPLES);
+                for (int i = 0; i < SAMPLES; i++) {
+                    int idx = i;
+                    long submitAt = System.nanoTime();
+                    exec.submit(ctx("NORTH_AMERICA", "GOLD", 5000, 1), () -> {
+                        latencies[idx] = System.nanoTime() - submitAt;
+                        latch.countDown();
+                    });
+                }
+                latch.await(15, TimeUnit.SECONDS);
+
+                Arrays.sort(latencies);
+                row(scenario, "[immediate] avg",    fmtNs(avg(latencies)), "INFO");
+                row(scenario, "[immediate] p50",    fmtNs(latencies[SAMPLES / 2]), "INFO");
+                row(scenario, "[immediate] p95",    fmtNs(latencies[(int)(SAMPLES * 0.95)]), "INFO");
+                row(scenario, "[immediate] p99",    fmtNs(latencies[(int)(SAMPLES * 0.99)]), "INFO");
+                row(scenario, "[immediate] max",    fmtNs(latencies[SAMPLES - 1]), "INFO");
+            } finally { exec.shutdownNow(); }
+        }
+
+        // ── PATH B: marginal overflow — TPS=1000, submit 1100 tasks at once ──
+        // First 1000 admitted immediately. Last 100 queue and wait for the
+        // oldest entries to slide out (~1ms apart at 1000 TPS).
+        // This shows realistic queue wait when slightly over limit, not a
+        // full-window-saturated worst case.
+        {
+            int TPS     = 1000;
+            int BURST   = 1100; // 10% over limit
+            int OVER    = BURST - TPS; // 100 tasks that must queue
+            var exec    = buildExecutor(makeConfig(100_000, TPS, 100_000));
+            try {
+                Thread.sleep(1100); // ensure clean window
+
+                long[] allLatencies = new long[BURST];
+                var latch = new CountDownLatch(BURST);
+
+                for (int i = 0; i < BURST; i++) {
+                    int idx = i;
+                    long submitAt = System.nanoTime();
+                    exec.submit(ctx("NORTH_AMERICA", "GOLD", 5000, 1), () -> {
+                        allLatencies[idx] = System.nanoTime() - submitAt;
+                        latch.countDown();
+                    });
+                }
+                latch.await(15, TimeUnit.SECONDS);
+
+                // Split: first TPS tasks (immediate) vs last OVER tasks (queued)
+                long[] immediateL = Arrays.copyOfRange(allLatencies, 0, TPS);
+                long[] queuedL    = Arrays.copyOfRange(allLatencies, TPS, BURST);
+                Arrays.sort(immediateL);
+                Arrays.sort(queuedL);
+
+                row(scenario, "[burst immediate] avg", fmtNs(avg(immediateL)), "INFO");
+                row(scenario, "[burst immediate] p99", fmtNs(immediateL[(int)(TPS * 0.99)]), "INFO");
+                row(scenario, "[burst queued]    avg", fmtNs(avg(queuedL)), "INFO");
+                row(scenario, "[burst queued]    p50", fmtNs(queuedL[OVER / 2]), "INFO");
+                row(scenario, "[burst queued]    p99", fmtNs(queuedL[(int)(OVER * 0.99)]), "INFO");
+                row(scenario, "[burst queued]    max", fmtNs(queuedL[OVER - 1]), "INFO");
+            } finally { exec.shutdownNow(); }
+        }
+
+        pass("PASS");
+    }
+
+    // -----------------------------------------------------------------------
+    // SCENARIO 13 — Priority correctness across all tree levels
+    //
+    // Priority tree (fast executor, highest → lowest):
+    //   Rank 1: NA + PLATINUM + amount>100k  → path[1,1,1]  sort: priority DESC
+    //   Rank 2: NA + PLATINUM + amount≤100k  → path[1,1,2]  sort: urgency  DESC
+    //   Rank 3: NA + GOLD                    → path[1,2,1]  FIFO
+    //   Rank 4: EUROPE                       → path[2,1,1]  sort: priority DESC
+    //
+    // Test: submit tasks in REVERSE priority order (Rank4 first, Rank1 last),
+    //       all of which queue because TPS is pre-saturated.
+    //       Verify drainer executes them in correct priority order.
+    // -----------------------------------------------------------------------
+    static void lt13(String scenario) throws Exception {
+        // TPS=10 to keep queue full long enough to observe ordering
+        var exec = buildExecutor(makeConfig(100_000, 10, 100_000));
+        try {
+            // Pre-saturate the TPS window so ALL test tasks queue
+            var saturateLatch = new CountDownLatch(10);
+            for (int i = 0; i < 10; i++) {
+                exec.submit(ctx("NORTH_AMERICA", "GOLD", 1000, 1), saturateLatch::countDown);
+            }
+            saturateLatch.await(5, TimeUnit.SECONDS);
+
+            // Define tasks in REVERSE priority order (worst first)
+            // label = expected rank (lower = higher priority)
+            record Task(String region, String tier, int amount, int priority, int expectedRank, String desc) {}
+            var tasks = List.of(
+                // Rank 4 — EUROPE (path [2,1,1])
+                new Task("EUROPE", "GOLD", 1000,  1, 4, "EU  prio=1"),
+                new Task("EUROPE", "GOLD", 1000,  5, 4, "EU  prio=5"),  // higher prio within rank4
+                new Task("EUROPE", "GOLD", 1000, 10, 4, "EU  prio=10"), // highest within rank4
+
+                // Rank 3 — NA + GOLD FIFO (path [1,2,1])
+                new Task("NORTH_AMERICA", "GOLD", 1000, 1, 3, "NA+GOLD fifo-1"),
+                new Task("NORTH_AMERICA", "GOLD", 1000, 1, 3, "NA+GOLD fifo-2"),
+                new Task("NORTH_AMERICA", "GOLD", 1000, 1, 3, "NA+GOLD fifo-3"),
+
+                // Rank 2 — NA + PLATINUM + low amount (path [1,1,2])
+                new Task("NORTH_AMERICA", "PLATINUM",  5000, 1,  2, "NA+PLAT+LOW  urg=1"),
+                new Task("NORTH_AMERICA", "PLATINUM",  5000, 5,  2, "NA+PLAT+LOW  urg=5"),
+                new Task("NORTH_AMERICA", "PLATINUM",  5000, 10, 2, "NA+PLAT+LOW  urg=10"),
+
+                // Rank 1 — NA + PLATINUM + HIGH VALUE (path [1,1,1])
+                new Task("NORTH_AMERICA", "PLATINUM", 200000,  1, 1, "NA+PLAT+HI   prio=1"),
+                new Task("NORTH_AMERICA", "PLATINUM", 200000,  5, 1, "NA+PLAT+HI   prio=5"),
+                new Task("NORTH_AMERICA", "PLATINUM", 200000, 10, 1, "NA+PLAT+HI   prio=10")
+            );
+
+            int N = tasks.size();
+            var execOrder = Collections.synchronizedList(new ArrayList<String>());
+            var latch = new CountDownLatch(N);
+
+            // Submit in reverse order (worst first)
+            for (int i = N - 1; i >= 0; i--) {
+                var t = tasks.get(i);
+                String desc = t.desc();
+                exec.submit(ctx(t.region(), t.tier(), t.amount(), t.priority()), () -> {
+                    execOrder.add(desc);
+                    latch.countDown();
+                    return null;
+                });
+            }
+
+            boolean ok = latch.await(30, TimeUnit.SECONDS);
+
+            // Check cross-rank ordering: every Rank1 task should complete before every Rank4 task
+            // Check within-rank sort-by: within EUROPE (rank4), prio=10 before prio=1
+            int rank1Before4 = 0, rank1Count = 0;
+            int euHighBeforeLow = -1, euLowPos = -1;
+            for (int i = 0; i < execOrder.size(); i++) {
+                String s = execOrder.get(i);
+                if (s.contains("NA+PLAT+HI"))   rank1Count++;
+                if (s.contains("NA+PLAT+HI") && firstOccurrence(execOrder, "EU") > i) rank1Before4++;
+                if (s.contains("EU  prio=10") && euHighBeforeLow == -1) euHighBeforeLow = i;
+                if (s.contains("EU  prio=1")  && euLowPos == -1)        euLowPos = i;
+            }
+
+            boolean crossRankOk  = rank1Before4 == rank1Count; // all rank1 before first rank4
+            boolean withinRankOk = euHighBeforeLow < euLowPos;  // EU prio=10 before prio=1
+
+            // Check FIFO within NA+GOLD
+            int fifo1 = execOrder.indexOf("NA+GOLD fifo-1");
+            int fifo2 = execOrder.indexOf("NA+GOLD fifo-2");
+            int fifo3 = execOrder.indexOf("NA+GOLD fifo-3");
+            boolean fifoOk = fifo1 < fifo2 && fifo2 < fifo3;
+
+            System.out.println("\n  [LT-13] Execution order:");
+            for (int i = 0; i < execOrder.size(); i++) {
+                System.out.printf("    %2d. %s%n", i + 1, execOrder.get(i));
+            }
+
+            String pass = ok && crossRankOk && withinRankOk && fifoOk ? "PASS" : "FAIL";
+            row(scenario, "cross-rank (Rank1 before Rank4)", crossRankOk ? "PASS" : "FAIL", pass);
+            row(scenario, "within-rank sort DESC (EU prio=10 first)", withinRankOk ? "PASS" : "FAIL", pass);
+            row(scenario, "FIFO within same bucket (NA+GOLD)", fifoOk ? "PASS" : "FAIL", pass);
+            row(scenario, "all tasks completed", String.valueOf(execOrder.size()) + "/" + N, pass);
+            pass(pass);
+        } finally { exec.shutdownNow(); }
+    }
+
+    static int firstOccurrence(List<String> list, String prefix) {
+        for (int i = 0; i < list.size(); i++) {
+            if (list.get(i).contains(prefix)) return i;
+        }
+        return Integer.MAX_VALUE;
+    }
+
+    static long avg(long[] sorted) {
+        long sum = 0; for (long v : sorted) sum += v; return sum / sorted.length;
+    }
+
+    static String fmtNs(long ns) {
+        if (ns < 1_000)           return ns + " ns";
+        if (ns < 1_000_000)       return String.format("%.1f µs", ns / 1_000.0);
+        return                           String.format("%.2f ms", ns / 1_000_000.0);
+    }
+
+    // -----------------------------------------------------------------------
     // Harness helpers
     // -----------------------------------------------------------------------
     @FunctionalInterface
@@ -587,7 +795,7 @@ public class LocalLoadTest {
             locks.put(id, lock);
             conds.put(id, lock.newCondition());
             int cap = hierarchy.getQueueCapacity(id);
-            strategies.put(id, PriorityStrategyFactory.createDefault(cap <= 0 ? Integer.MAX_VALUE : cap));
+            strategies.put(id, PriorityStrategyFactory.createDefault(cap));
             SlidingWindowCounter counter = tpsGate.getCounter(id);
             if (counter != null) {
                 var l = lock; var c = conds.get(id);

@@ -36,7 +36,7 @@ public class FIFOStrategy<T> implements PriorityStrategy<T> {
     public FIFOStrategy(int capacity) {
         this.capacity = capacity;
         this.queue = new PriorityBlockingQueue<>(
-                Math.min(capacity, 1000), // Initial capacity
+                Math.max(1, Math.min(capacity, 1000)), // Initial capacity (min 1 required by PBQ)
                 (t1, t2) -> t1.compareTo(t2)
         );
         this.capacitySemaphore = new Semaphore(capacity);
