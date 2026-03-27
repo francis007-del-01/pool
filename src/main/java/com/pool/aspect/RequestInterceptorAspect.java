@@ -41,7 +41,7 @@ import java.util.concurrent.TimeoutException;
 public class RequestInterceptorAspect {
 
     private static final Logger log = LoggerFactory.getLogger(RequestInterceptorAspect.class);
-    private static final long DEFAULT_TIMEOUT_MS = 5000;
+    private static final long DEFAULT_TIMEOUT_MS = 10000;
 
     private final TpsPoolExecutor tpsPoolExecutor;
     private final ObjectMapper objectMapper;
