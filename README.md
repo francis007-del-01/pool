@@ -181,13 +181,84 @@ pool.config-path=classpath:pool.yaml
 ```java
 @Service
 public class OrderService {
-    
+
     @Autowired
     private PoolExecutor poolExecutor;
-    
+
     public void processOrder(String orderJson, Map<String, String> headers) {
         TaskContext ctx = TaskContextFactory.create(orderJson, headers);
         poolExecutor.submit(ctx, () -> doProcess(ctx));
+    }
+}
+```
+
+### Option B: @Pooled Annotation (Zero Boilerplate)
+
+Annotate your service class or individual methods with `@Pooled` and Pool intercepts those calls automatically via AOP. No manual `TaskContext` creation or `PoolExecutor` wiring needed.
+
+**Class-level** — gates every method in the class with the same config:
+
+```java
+import com.pool.annotation.Pooled;
+
+@Service
+@Pooled(contextType = OrderRequest.class, timeoutMs = 5000)
+public class OrderService {
+
+    public String processOrder(OrderRequest req) {
+        return doProcess(req);
+    }
+}
+```
+
+**Method-level** — gates individual methods, each with their own config:
+
+```java
+@Service
+public class OrderService {
+
+    @Pooled(contextType = OrderRequest.class, timeoutMs = 5000)
+    public String processOrder(OrderRequest req) {
+        return doProcess(req);
+    }
+
+    @Pooled(contextType = RefundRequest.class, timeoutMs = 2000)
+    public void processRefund(RefundRequest req) {
+        doRefund(req);
+    }
+
+    // Not gated — no @Pooled
+    public void healthCheck() { }
+}
+```
+
+**How it works:**
+1. The AOP aspect intercepts the method call before it reaches your code
+2. It extracts the method argument matching `contextType` and builds a `TaskContext` from it
+3. The task is submitted to the `PoolExecutor` and the caller blocks until TPS capacity is available
+4. If TPS is not available within `timeoutMs`, a `TpsExceededException` is thrown
+5. Once admitted, the original method executes normally on a pool thread
+
+**`@Pooled` attributes:**
+
+| Attribute | Default | Description |
+|-----------|---------|-------------|
+| `contextType` | `Void.class` | Type of the method argument to use as request context. Pool will extract `$req.*` variables from this object (parsed as JSON). Use `Void.class` to rely on MDC only. |
+| `timeoutMs` | `-1` (pool default: 5000ms) | How long to wait for TPS admission before throwing `TpsExceededException`. |
+
+**Cascading calls (service A calls service B):**
+If both services are annotated with `@Pooled`, Pool uses a thread-local flag (`TpsContext`) so that once a request is admitted, any nested calls to other `@Pooled`-annotated services on the same thread bypass the TPS gate — no double-gating, no deadlock risk.
+
+```java
+@Service
+@Pooled(contextType = OrderRequest.class)
+public class OrderService {
+    @Autowired private PaymentService paymentService;
+
+    public void processOrder(OrderRequest req) {
+        // PaymentService is also @Pooled-annotated, but this nested call
+        // bypasses the TPS gate because the thread is already admitted.
+        paymentService.charge(req.getPayment());
     }
 }
 ```
@@ -313,6 +384,12 @@ Pool uses **TPS (Transactions Per Second)** as the primary rate control mechanis
 3. **Unbounded Threads**: Threads spawn as needed when TPS allows - no fixed pool size.
 
 4. **Priority Queuing**: When TPS exceeded, tasks queue ordered by priority vector.
+
+### TPS Accuracy & Race Condition Behaviour
+
+`TpsGate.tryAcquire()` performs a **check-then-act** that is intentionally not atomic: it checks capacity across the executor chain, then adds the identifier in a second pass. Under concurrent load, multiple threads can pass the capacity check simultaneously before any of them completes the add, causing a brief, non-deterministic overshoot.
+
+This is a deliberate tradeoff: accept occasional overshoot in exchange for zero lock contention on the submission path. Wrapping the check-and-add in a `ReentrantLock` eliminates overshoot entirely but serialises every `submit()` call through a single global lock, capping throughput under high concurrency.
 
 ### Example: VIP vs Bulk Processing
 

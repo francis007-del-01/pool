@@ -118,15 +118,6 @@ public class ExecutorHierarchy {
     }
 
     /**
-     * Get identifier field for an executor.
-     * Returns null if not configured (use default request ID).
-     */
-    public String getIdentifierField(String executorId) {
-        ExecutorSpec spec = executors.get(executorId);
-        return spec != null ? spec.getIdentifierField() : null;
-    }
-
-    /**
      * Get executor spec by ID.
      */
     public ExecutorSpec getExecutor(String executorId) {

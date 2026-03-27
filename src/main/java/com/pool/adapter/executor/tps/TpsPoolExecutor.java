@@ -72,16 +72,13 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
 
         submittedCount.incrementAndGet();
 
-        // Try to acquire TPS (uses per-executor identifier field)
-        if (tpsGate.tryAcquire(context, executorId)) {
-            // Under TPS limit - execute immediately
+        if (tpsGate.tryAcquire(executorId)) {
             queueManager.executeTask(task, requestId, executorId);
             log.debug("Task {} executed immediately (executor: {}, TPS: {}/{})",
                     requestId, executorId,
                     tpsGate.getCurrentTps(executorId),
                     hierarchy.getTps(executorId));
         } else {
-            // TPS limit hit - queue the task
             try {
                 queueManager.queueTask(task, requestId, executorId, priorityKey, context);
             } catch (TaskRejectedException e) {
@@ -105,7 +102,6 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
 
         FutureTask<T> futureTask = new FutureTask<>(task);
 
-        // Evaluate priority and get target executor
         EvaluationResult result = policyEngine.evaluate(context);
         String executorId = result.getMatchedPath().executor();
 
@@ -118,8 +114,7 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
 
         submittedCount.incrementAndGet();
 
-        // Try to acquire TPS (uses per-executor identifier field)
-        if (tpsGate.tryAcquire(context, executorId)) {
+        if (tpsGate.tryAcquire(executorId)) {
             queueManager.executeTask(futureTask, requestId, executorId);
         } else {
             try {

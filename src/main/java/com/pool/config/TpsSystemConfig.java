@@ -3,10 +3,8 @@ package com.pool.config;
 import com.pool.adapter.executor.tps.TaskQueueManager;
 import com.pool.adapter.executor.tps.TpsGate;
 import com.pool.adapter.executor.tps.TpsPoolExecutor;
-import com.pool.core.SlidingWindowCounter;
+import com.pool.core.TpsCounter;
 import com.pool.policy.PolicyEngine;
-import com.pool.variable.DefaultVariableResolver;
-import com.pool.variable.VariableResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
@@ -20,9 +18,9 @@ import java.util.concurrent.locks.ReentrantLock;
 /**
  * Centralized configuration for the TPS executor system.
  * Creates and wires all TPS-related beans:
- * ExecutorHierarchy, TpsGate, TaskQueueManager, TpsPoolExecutor.
+ * ExecutorHierarchy, TpsGate (with TpsCounters), TaskQueueManager, TpsPoolExecutor.
  *
- * All cross-component wiring (e.g., eviction callbacks) is handled here,
+ * All cross-component wiring (e.g., reset callbacks) is handled here,
  * keeping individual classes decoupled from each other's internals.
  */
 @Configuration
@@ -31,7 +29,6 @@ public class TpsSystemConfig {
     private static final Logger log = LoggerFactory.getLogger(TpsSystemConfig.class);
 
     private static final long DEFAULT_WINDOW_SIZE_MS = 1000;
-    private static final long DEFAULT_ADMITTED_TTL_MS = 5 * 60 * 1000L;
 
     private final ExecutorHierarchy hierarchy;
     private final Map<String, ReentrantLock> capacityLocks = new ConcurrentHashMap<>();
@@ -49,31 +46,22 @@ public class TpsSystemConfig {
     }
 
     @Bean
-    public VariableResolver variableResolver() {
-        return new DefaultVariableResolver();
-    }
-
-    @Bean
     public ExecutorHierarchy executorHierarchy() {
         return hierarchy;
     }
 
     @Bean
-    public TpsGate tpsGate(ExecutorHierarchy hierarchy, VariableResolver variableResolver) {
-        ConcurrentHashMap<String, SlidingWindowCounter> counters = new ConcurrentHashMap<>();
-        ConcurrentHashMap<String, SlidingWindowCounter> admittedIds = new ConcurrentHashMap<>();
+    public TpsGate tpsGate(ExecutorHierarchy hierarchy) {
+        ConcurrentHashMap<String, TpsCounter> counters = new ConcurrentHashMap<>();
 
         for (String executorId : hierarchy.getAllExecutorIds()) {
-            SlidingWindowCounter counter = new SlidingWindowCounter(DEFAULT_WINDOW_SIZE_MS);
+            TpsCounter counter = new TpsCounter(DEFAULT_WINDOW_SIZE_MS);
             final String execId = executorId;
-            counter.setOnEviction(() -> signalCapacity(execId));
+            counter.setOnReset(() -> signalCapacity(execId));
             counters.put(executorId, counter);
-
-            admittedIds.put(executorId, new SlidingWindowCounter(DEFAULT_ADMITTED_TTL_MS));
         }
 
-        return new TpsGate(hierarchy, counters, admittedIds, variableResolver,
-                DEFAULT_WINDOW_SIZE_MS, DEFAULT_ADMITTED_TTL_MS);
+        return new TpsGate(hierarchy, counters, DEFAULT_WINDOW_SIZE_MS);
     }
 
     @Bean

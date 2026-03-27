@@ -16,21 +16,18 @@ pool:
       - id: "main"
         tps: 1000
         queue-capacity: 5000
-        identifier-field: "$req.requestId"
 
       # Child executor for fast/VIP traffic
       - id: "fast"
         parent: "main"
         tps: 500
         queue-capacity: 2000
-        identifier-field: "$req.requestId"
 
       # Child executor for bulk traffic
       - id: "bulk"
         parent: "main"
         tps: 300
         queue-capacity: 1000
-        identifier-field: "$req.requestId"
 
   # Priority Strategy Configuration
   priority-strategy:

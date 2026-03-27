@@ -4,7 +4,7 @@ import com.pool.adapter.executor.tps.TaskQueueManager;
 import com.pool.adapter.executor.tps.TpsGate;
 import com.pool.adapter.executor.tps.TpsPoolExecutor;
 import com.pool.config.*;
-import com.pool.core.SlidingWindowCounter;
+import com.pool.core.TpsCounter;
 import com.pool.core.TaskContext;
 import com.pool.core.TaskContextFactory;
 import com.pool.exception.TaskRejectedException;
@@ -74,11 +74,11 @@ class PoolApplicationTest {
             int cap = hierarchy.getQueueCapacity(id);
             strategies.put(id, com.pool.strategy.PriorityStrategyFactory.createDefault(cap <= 0 ? Integer.MAX_VALUE : cap));
 
-            SlidingWindowCounter counter = tpsGate.getCounter(id);
+            TpsCounter counter = tpsGate.getCounter(id);
             if (counter != null) {
                 final java.util.concurrent.locks.ReentrantLock l = lock;
                 final java.util.concurrent.locks.Condition c = conditions.get(id);
-                counter.setOnEviction(() -> {
+                counter.setOnReset(() -> {
                     l.lock();
                     try { c.signalAll(); } finally { l.unlock(); }
                 });
@@ -532,9 +532,9 @@ class PoolApplicationTest {
     private PoolConfig createPoolConfig() {
         // Create executors matching pool.yaml
         List<ExecutorSpec> executors = new ArrayList<>(List.of(
-                ExecutorSpec.root("main", 1000, 5000, "$req.requestId"),
-                ExecutorSpec.child("fast", "main", 500, 2000, "$req.requestId"),
-                ExecutorSpec.child("bulk", "main", 300, 1000, "$req.requestId")
+                ExecutorSpec.root("main", 1000, 5000),
+                ExecutorSpec.child("fast", "main", 500, 2000),
+                ExecutorSpec.child("bulk", "main", 300, 1000)
         ));
 
         // Create priority tree matching pool.yaml

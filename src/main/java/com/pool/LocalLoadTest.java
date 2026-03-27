@@ -4,7 +4,7 @@ import com.pool.adapter.executor.tps.TaskQueueManager;
 import com.pool.adapter.executor.tps.TpsGate;
 import com.pool.adapter.executor.tps.TpsPoolExecutor;
 import com.pool.config.*;
-import com.pool.core.SlidingWindowCounter;
+import com.pool.core.TpsCounter;
 import com.pool.core.TaskContext;
 import com.pool.core.TaskContextFactory;
 import com.pool.exception.TaskRejectedException;
@@ -359,9 +359,9 @@ public class LocalLoadTest {
     static void lt08(String scenario) throws Exception {
         // fast: TPS=5, queue cap=20 → 200 tasks will overflow heavily
         var executors = List.of(
-            ExecutorSpec.root("main", 1000, 10000, null),
-            ExecutorSpec.child("fast", "main", 5, 20, null),
-            ExecutorSpec.child("bulk", "main", 100, 500, null)
+            ExecutorSpec.root("main", 1000, 10000),
+            ExecutorSpec.child("fast", "main", 5, 20),
+            ExecutorSpec.child("bulk", "main", 100, 500)
         );
         var cfg = new PoolConfig();
         cfg.setName("overflow-test"); cfg.setVersion("1.0");
@@ -796,10 +796,10 @@ public class LocalLoadTest {
             conds.put(id, lock.newCondition());
             int cap = hierarchy.getQueueCapacity(id);
             strategies.put(id, PriorityStrategyFactory.createDefault(cap));
-            SlidingWindowCounter counter = tpsGate.getCounter(id);
+            com.pool.core.TpsCounter counter = tpsGate.getCounter(id);
             if (counter != null) {
                 var l = lock; var c = conds.get(id);
-                counter.setOnEviction(() -> { l.lock(); try { c.signalAll(); } finally { l.unlock(); } });
+                counter.setOnReset(() -> { l.lock(); try { c.signalAll(); } finally { l.unlock(); } });
             }
         }
         return new TpsPoolExecutor(config, pe, hierarchy, tpsGate,
@@ -814,9 +814,9 @@ public class LocalLoadTest {
         cfg.setName("local-load-test"); cfg.setVersion("1.0");
         var adapters = new AdaptersConfig();
         adapters.setExecutors(new ArrayList<>(List.of(
-            ExecutorSpec.root("main", mainTps, 10000, null),
-            ExecutorSpec.child("fast", "main", fastTps, 5000, null),
-            ExecutorSpec.child("bulk", "main", bulkTps, 3000, null)
+            ExecutorSpec.root("main", mainTps, 10000),
+            ExecutorSpec.child("fast", "main", fastTps, 5000),
+            ExecutorSpec.child("bulk", "main", bulkTps, 3000)
         )));
         cfg.setAdapters(adapters);
         cfg.setPriorityTree(new ArrayList<>(List.of(

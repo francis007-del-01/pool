@@ -4,7 +4,7 @@ import com.pool.adapter.executor.tps.TaskQueueManager;
 import com.pool.adapter.executor.tps.TpsGate;
 import com.pool.adapter.executor.tps.TpsPoolExecutor;
 import com.pool.config.*;
-import com.pool.core.SlidingWindowCounter;
+import com.pool.core.TpsCounter;
 import com.pool.core.TaskContext;
 import com.pool.core.TaskContextFactory;
 import com.pool.policy.PolicyEngine;
@@ -59,11 +59,11 @@ class LoadTest {
             conditions.put(id, lock.newCondition());
             int cap = hierarchy.getQueueCapacity(id);
             strategies.put(id, PriorityStrategyFactory.createDefault(cap <= 0 ? Integer.MAX_VALUE : cap));
-            SlidingWindowCounter counter = tpsGate.getCounter(id);
+            TpsCounter counter = tpsGate.getCounter(id);
             if (counter != null) {
                 final java.util.concurrent.locks.ReentrantLock l = lock;
                 final java.util.concurrent.locks.Condition c = conditions.get(id);
-                counter.setOnEviction(() -> {
+                counter.setOnReset(() -> {
                     l.lock();
                     try { c.signalAll(); } finally { l.unlock(); }
                 });
@@ -76,9 +76,9 @@ class LoadTest {
     /** Build config with configurable TPS values */
     private static PoolConfig makeConfig(int mainTps, int fastTps, int bulkTps) {
         List<ExecutorSpec> executors = List.of(
-                ExecutorSpec.root("main", mainTps, 10000, null),
-                ExecutorSpec.child("fast", "main", fastTps, 5000, null),
-                ExecutorSpec.child("bulk", "main", bulkTps, 3000, null)
+                ExecutorSpec.root("main", mainTps, 10000),
+                ExecutorSpec.child("fast", "main", fastTps, 5000),
+                ExecutorSpec.child("bulk", "main", bulkTps, 3000)
         );
         List<PriorityNodeConfig> tree = List.of(
                 node("L1.NORTH_AMERICA", "$req.region == \"NORTH_AMERICA\"", null, null, List.of(
@@ -503,9 +503,9 @@ class LoadTest {
     void lt08_queueOverflow() throws Exception {
         // fast queue capacity = 20, fast TPS = 5
         List<ExecutorSpec> executors = List.of(
-                ExecutorSpec.root("main", 1000, 10000, null),
-                ExecutorSpec.child("fast", "main", 5, 20, null),   // tiny queue
-                ExecutorSpec.child("bulk", "main", 100, 500, null)
+                ExecutorSpec.root("main", 1000, 10000),
+                ExecutorSpec.child("fast", "main", 5, 20),
+                ExecutorSpec.child("bulk", "main", 100, 500)
         );
         PoolConfig cfg = new PoolConfig();
         cfg.setName("overflow-test");

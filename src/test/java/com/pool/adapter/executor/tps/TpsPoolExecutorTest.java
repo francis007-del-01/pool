@@ -1,7 +1,7 @@
 package com.pool.adapter.executor.tps;
 
 import com.pool.config.*;
-import com.pool.core.SlidingWindowCounter;
+import com.pool.core.TpsCounter;
 import com.pool.core.TaskContext;
 import com.pool.core.TaskContextFactory;
 import com.pool.exception.TaskRejectedException;
@@ -255,11 +255,11 @@ class TpsPoolExecutorTest {
             int cap = hierarchy.getQueueCapacity(id);
             strategies.put(id, com.pool.strategy.PriorityStrategyFactory.createDefault(cap <= 0 ? Integer.MAX_VALUE : cap));
 
-            SlidingWindowCounter counter = tpsGate.getCounter(id);
+            TpsCounter counter = tpsGate.getCounter(id);
             if (counter != null) {
                 final java.util.concurrent.locks.ReentrantLock l = lock;
                 final java.util.concurrent.locks.Condition c = conditions.get(id);
-                counter.setOnEviction(() -> {
+                counter.setOnReset(() -> {
                     l.lock();
                     try { c.signalAll(); } finally { l.unlock(); }
                 });

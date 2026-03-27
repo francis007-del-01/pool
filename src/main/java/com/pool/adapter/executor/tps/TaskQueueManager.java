@@ -4,6 +4,7 @@ import com.pool.config.ExecutorHierarchy;
 import com.pool.core.PrioritizedPayload;
 import com.pool.core.TaskContext;
 import com.pool.exception.TaskRejectedException;
+import com.pool.exception.TpsExceededException;
 import com.pool.priority.PriorityKey;
 import com.pool.strategy.PriorityStrategy;
 import org.slf4j.Logger;
@@ -18,6 +19,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Manages per-executor priority queues, capacity signaling, drainer threads,
  * and the shared thread pool for task execution.
+ *
+ * Supports two modes:
+ * 1. Fire-and-forget: executeTask / queueTask for Runnable tasks
+ * 2. Blocking admission: queueAndAwait for the AOP aspect — caller blocks
+ *    on a CompletableFuture until the drainer acquires TPS capacity
  */
 public class TaskQueueManager {
 
@@ -25,29 +31,15 @@ public class TaskQueueManager {
 
     private final ExecutorHierarchy hierarchy;
     private final TpsGate tpsGate;
-
-    // Per-executor priority strategies for task ordering and capacity
     private final Map<String, PriorityStrategy<QueuedTask>> executorStrategies;
-
-    // Thread pool for execution (unbounded)
     private final ExecutorService threadPool;
-
-    // Queue drainer threads (one per executor)
     private final Map<String, Thread> drainerThreads = new ConcurrentHashMap<>();
-
-    // Per-executor locks and conditions for capacity signaling
     private final Map<String, java.util.concurrent.locks.ReentrantLock> capacityLocks;
     private final Map<String, java.util.concurrent.locks.Condition> capacityConditions;
-
     private final AtomicBoolean shutdown = new AtomicBoolean(false);
     private final AtomicInteger activeCount = new AtomicInteger(0);
     private final AtomicInteger executedCount = new AtomicInteger(0);
 
-    /**
-     * Primary constructor — accepts pre-built queues and signaling infrastructure.
-     * Used by TpsSystemConfig for centralized initialization.
-     * Starts drainer threads for each executor.
-     */
     public TaskQueueManager(ExecutorHierarchy hierarchy, TpsGate tpsGate,
                             Map<String, PriorityStrategy<QueuedTask>> executorStrategies,
                             Map<String, java.util.concurrent.locks.ReentrantLock> capacityLocks,
@@ -74,7 +66,6 @@ public class TaskQueueManager {
         }
     }
 
-
     /**
      * Execute a task immediately on the thread pool.
      */
@@ -93,15 +84,13 @@ public class TaskQueueManager {
 
     /**
      * Queue a task for deferred execution when TPS capacity becomes available.
+     * Fire-and-forget mode — task runs on thread pool when dequeued.
      */
     public void queueTask(Runnable task, String requestId, String executorId,
                            PriorityKey priorityKey, TaskContext context) {
-        PriorityStrategy<QueuedTask> strategy = executorStrategies.get(executorId);
-        if (strategy == null) {
-            throw new TaskRejectedException("Unknown executor: " + executorId);
-        }
+        PriorityStrategy<QueuedTask> strategy = getStrategy(executorId);
 
-        QueuedTask queuedTask = new QueuedTask(task, requestId, executorId, priorityKey, context);
+        QueuedTask queuedTask = new QueuedTask(task, requestId, executorId, priorityKey, context, null);
         PrioritizedPayload<QueuedTask> payload = new PrioritizedPayload<>(queuedTask, requestId, priorityKey);
 
         if (!strategy.enqueue(payload)) {
@@ -115,8 +104,34 @@ public class TaskQueueManager {
     }
 
     /**
+     * Queue a request and return a CompletableFuture that completes when TPS is acquired.
+     * Used by the AOP aspect — the caller blocks on the future with a timeout.
+     * When the drainer acquires TPS, it completes the future, and the caller proceeds.
+     *
+     * @return CompletableFuture that completes when admitted, or exceptionally on queue full
+     */
+    public CompletableFuture<Void> queueAndAwait(String executorId, PriorityKey priorityKey, TaskContext context) {
+        PriorityStrategy<QueuedTask> strategy = getStrategy(executorId);
+
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        String requestId = context.getTaskId();
+
+        QueuedTask queuedTask = new QueuedTask(null, requestId, executorId, priorityKey, context, future);
+        PrioritizedPayload<QueuedTask> payload = new PrioritizedPayload<>(queuedTask, requestId, priorityKey);
+
+        if (!strategy.enqueue(payload)) {
+            future.completeExceptionally(new TaskRejectedException(
+                    "Queue full for executor '" + executorId + "' (capacity: " + strategy.getCapacity() + ")"));
+        }
+
+        log.debug("Request {} queued for admission to executor '{}' (queue size: {})",
+                requestId, executorId, strategy.getQueueSize());
+
+        return future;
+    }
+
+    /**
      * Drains queued tasks when TPS capacity becomes available.
-     * Uses dual-trigger: blocks on queue for new tasks, and wakes on capacity signal.
      */
     private void drainQueue(String executorId) {
         PriorityStrategy<QueuedTask> strategy = executorStrategies.get(executorId);
@@ -125,32 +140,42 @@ public class TaskQueueManager {
 
         while (!shutdown.get()) {
             try {
-                // Wait for items in queue
                 Optional<PrioritizedPayload<QueuedTask>> polled = strategy.pollNext(100, TimeUnit.MILLISECONDS);
-                if (polled.isEmpty()) {
-                    continue;
-                }
+                if (polled.isEmpty()) continue;
 
                 QueuedTask task = polled.get().getPayload();
 
-                // Hold the task and wait for capacity instead of re-inserting
-                while (!shutdown.get() && !tpsGate.tryAcquire(task.context(), executorId)) {
-                    // Wait for capacity signal or timeout as safety net
+                while (!shutdown.get() && !tpsGate.tryAcquire(task.executorId())) {
                     lock.lock();
                     try {
                         capacityAvailable.await(tpsGate.getWindowSizeMs(), TimeUnit.MILLISECONDS);
                     } finally {
                         lock.unlock();
                     }
+
+                    // Check if the future has been cancelled/timed out by the caller
+                    if (task.admissionFuture() != null && task.admissionFuture().isDone()) {
+                        log.debug("Queued request {} cancelled/timed out, discarding", task.requestId());
+                        break;
+                    }
                 }
 
-                if (!shutdown.get()) {
+                if (shutdown.get()) {
+                    strategy.enqueue(new PrioritizedPayload<>(task, task.requestId(), task.priorityKey()));
+                    continue;
+                }
+
+                // TPS acquired — either complete the future or execute the task
+                if (task.admissionFuture() != null) {
+                    if (!task.admissionFuture().isDone()) {
+                        task.admissionFuture().complete(null);
+                        log.debug("Admission granted for queued request {} on executor '{}'",
+                                task.requestId(), executorId);
+                    }
+                } else if (task.task() != null) {
                     executeTask(task.task(), task.requestId(), executorId);
                     log.debug("Dequeued and executed task {} for executor '{}'",
                             task.requestId(), executorId);
-                } else {
-                    // Shutting down — put task back so it's not lost
-                    strategy.enqueue(new PrioritizedPayload<>(task, task.requestId(), task.priorityKey()));
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -159,9 +184,14 @@ public class TaskQueueManager {
         }
     }
 
-    /**
-     * Graceful shutdown — interrupts drainers and shuts down thread pool.
-     */
+    private PriorityStrategy<QueuedTask> getStrategy(String executorId) {
+        PriorityStrategy<QueuedTask> strategy = executorStrategies.get(executorId);
+        if (strategy == null) {
+            throw new TaskRejectedException("Unknown executor: " + executorId);
+        }
+        return strategy;
+    }
+
     public void shutdown() {
         log.info("Shutting down TaskQueueManager");
         shutdown.set(true);
@@ -171,9 +201,6 @@ public class TaskQueueManager {
         threadPool.shutdown();
     }
 
-    /**
-     * Immediate shutdown.
-     */
     public void shutdownNow() {
         log.info("Shutting down TaskQueueManager immediately");
         shutdown.set(true);
@@ -215,14 +242,16 @@ public class TaskQueueManager {
     }
 
     /**
-     * Queued task wrapper with priority key for ordering.
+     * Queued task wrapper. Supports both fire-and-forget (task != null)
+     * and blocking admission (admissionFuture != null) modes.
      */
     public record QueuedTask(
             Runnable task,
             String requestId,
             String executorId,
             PriorityKey priorityKey,
-            TaskContext context
+            TaskContext context,
+            CompletableFuture<Void> admissionFuture
     ) implements Comparable<QueuedTask> {
 
         @Override
