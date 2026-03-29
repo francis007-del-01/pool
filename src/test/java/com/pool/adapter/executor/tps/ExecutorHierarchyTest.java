@@ -2,6 +2,7 @@ package com.pool.adapter.executor.tps;
 
 import com.pool.config.ExecutorHierarchy;
 import com.pool.config.ExecutorSpec;
+import com.pool.exception.ConfigurationException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;
 
@@ -25,10 +26,45 @@ class ExecutorHierarchyTest {
 
         ExecutorHierarchy hierarchy = new ExecutorHierarchy(specs);
 
-        assertEquals("main", hierarchy.getRootId());
+        assertTrue(hierarchy.getRootIds().contains("main"));
+        assertEquals(1, hierarchy.getRootIds().size());
         assertEquals(3, hierarchy.getAllExecutorIds().size());
         assertTrue(hierarchy.isRoot("main"));
         assertFalse(hierarchy.isRoot("vip"));
+    }
+
+    @Test
+    @DisplayName("Should support multiple root executors")
+    void shouldSupportMultipleRoots() {
+        List<ExecutorSpec> specs = List.of(
+                ExecutorSpec.root("root1", 1000, 5000),
+                ExecutorSpec.root("root2", 500, 2000),
+                ExecutorSpec.child("vip", "root1", 400)
+        );
+
+        ExecutorHierarchy hierarchy = new ExecutorHierarchy(specs);
+
+        assertEquals(2, hierarchy.getRootIds().size());
+        assertTrue(hierarchy.getRootIds().contains("root1"));
+        assertTrue(hierarchy.getRootIds().contains("root2"));
+        assertEquals("root1", hierarchy.getRootIdFor("vip"));
+        assertEquals("root2", hierarchy.getRootIdFor("root2"));
+    }
+
+    @Test
+    @DisplayName("Should get root ID for any executor in chain")
+    void shouldGetRootIdFor() {
+        List<ExecutorSpec> specs = List.of(
+                ExecutorSpec.root("main", 1000, 5000),
+                ExecutorSpec.child("level1", "main", 500),
+                ExecutorSpec.child("level2", "level1", 200)
+        );
+
+        ExecutorHierarchy hierarchy = new ExecutorHierarchy(specs);
+
+        assertEquals("main", hierarchy.getRootIdFor("main"));
+        assertEquals("main", hierarchy.getRootIdFor("level1"));
+        assertEquals("main", hierarchy.getRootIdFor("level2"));
     }
 
     @Test
@@ -43,8 +79,8 @@ class ExecutorHierarchyTest {
 
         List<String> chain = hierarchy.getExecutorChain("vip");
         assertEquals(2, chain.size());
-        assertEquals("vip", chain.get(0));  // Self first
-        assertEquals("main", chain.get(1)); // Then parent
+        assertEquals("vip", chain.get(0));
+        assertEquals("main", chain.get(1));
     }
 
     @Test
@@ -62,7 +98,7 @@ class ExecutorHierarchyTest {
     }
 
     @Test
-    @DisplayName("Should get queue capacity from root")
+    @DisplayName("Should get queue capacity from root; child returns root capacity")
     void shouldGetQueueCapacity() {
         List<ExecutorSpec> specs = List.of(
                 ExecutorSpec.root("main", 1000, 5000),
@@ -72,6 +108,38 @@ class ExecutorHierarchyTest {
         ExecutorHierarchy hierarchy = new ExecutorHierarchy(specs);
 
         assertEquals(5000, hierarchy.getQueueCapacity("main"));
+        assertEquals(5000, hierarchy.getQueueCapacity("vip")); // child returns root's capacity
+    }
+
+    @Test
+    @DisplayName("Should default queue capacity to 1000 when root has none set")
+    void shouldDefaultQueueCapacity() {
+        List<ExecutorSpec> specs = List.of(
+                ExecutorSpec.root("main", 1000, 0), // no explicit capacity
+                ExecutorSpec.child("vip", "main", 400)
+        );
+
+        ExecutorHierarchy hierarchy = new ExecutorHierarchy(specs);
+
+        assertEquals(1000, hierarchy.getQueueCapacity("main"));
+        assertEquals(1000, hierarchy.getQueueCapacity("vip"));
+    }
+
+    @Test
+    @DisplayName("Should reject queue-capacity on child executor")
+    void shouldRejectQueueCapacityOnChild() {
+        ExecutorSpec child = new ExecutorSpec();
+        child.setId("vip");
+        child.setParent("main");
+        child.setTps(400);
+        child.setQueueCapacity(500); // not allowed on child
+
+        List<ExecutorSpec> specs = List.of(
+                ExecutorSpec.root("main", 1000, 5000),
+                child
+        );
+
+        assertThrows(ConfigurationException.class, () -> new ExecutorHierarchy(specs));
     }
 
     @Test
@@ -150,18 +218,7 @@ class ExecutorHierarchyTest {
     void shouldRejectDuplicateIds() {
         List<ExecutorSpec> specs = List.of(
                 ExecutorSpec.root("main", 1000, 5000),
-                ExecutorSpec.root("main", 500, 0) // Duplicate
-        );
-
-        assertThrows(IllegalArgumentException.class, () -> new ExecutorHierarchy(specs));
-    }
-
-    @Test
-    @DisplayName("Should reject multiple root executors")
-    void shouldRejectMultipleRoots() {
-        List<ExecutorSpec> specs = List.of(
-                ExecutorSpec.root("main1", 1000, 5000),
-                ExecutorSpec.root("main2", 500, 2000) // Second root
+                ExecutorSpec.root("main", 500, 0)
         );
 
         assertThrows(IllegalArgumentException.class, () -> new ExecutorHierarchy(specs));
@@ -172,7 +229,7 @@ class ExecutorHierarchyTest {
     void shouldRejectUnknownParent() {
         List<ExecutorSpec> specs = List.of(
                 ExecutorSpec.root("main", 1000, 5000),
-                ExecutorSpec.child("vip", "unknown", 400) // Unknown parent
+                ExecutorSpec.child("vip", "unknown", 400)
         );
 
         assertThrows(IllegalArgumentException.class, () -> new ExecutorHierarchy(specs));
@@ -183,7 +240,7 @@ class ExecutorHierarchyTest {
     void shouldRejectChildExceedingParent() {
         List<ExecutorSpec> specs = List.of(
                 ExecutorSpec.root("main", 100, 5000),
-                ExecutorSpec.child("vip", "main", 200) // Exceeds parent
+                ExecutorSpec.child("vip", "main", 200)
         );
 
         assertThrows(IllegalArgumentException.class, () -> new ExecutorHierarchy(specs));
@@ -193,7 +250,7 @@ class ExecutorHierarchyTest {
     @DisplayName("Should allow unbounded parent with bounded child")
     void shouldAllowUnboundedParent() {
         List<ExecutorSpec> specs = List.of(
-                ExecutorSpec.unboundedRoot("main", 5000), // TPS = 0 (unbounded)
+                ExecutorSpec.unboundedRoot("main", 5000),
                 ExecutorSpec.child("vip", "main", 400)
         );
 

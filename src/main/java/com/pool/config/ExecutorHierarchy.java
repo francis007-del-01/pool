@@ -1,5 +1,6 @@
 package com.pool.config;
 
+import com.pool.exception.ConfigurationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.util.*;
@@ -7,14 +8,19 @@ import java.util.*;
 /**
  * Manages hierarchical executor relationships (parent-child).
  * Validates configuration and provides traversal methods.
+ *
+ * <p>Only root executors (those without a parent) have a queue.
+ * All child executors share their root's queue.
+ * Multiple root executors are supported — each gets its own independent queue.
  */
 public class ExecutorHierarchy {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutorHierarchy.class);
+    private static final int DEFAULT_QUEUE_CAPACITY = 1000;
 
     private final Map<String, ExecutorSpec> executors;
     private final Map<String, List<String>> children; // parent -> children
-    private final String rootId;
+    private final Set<String> rootIds;
 
     public ExecutorHierarchy(PoolConfig config) {
         this(config.getExecutors());
@@ -27,6 +33,7 @@ public class ExecutorHierarchy {
 
         this.executors = new HashMap<>();
         this.children = new HashMap<>();
+        this.rootIds = new LinkedHashSet<>();
 
         // Build executor map
         for (ExecutorSpec spec : specs) {
@@ -40,65 +47,55 @@ public class ExecutorHierarchy {
         }
 
         // Validate and build hierarchy
-        String foundRoot = null;
         for (ExecutorSpec spec : specs) {
             String parentId = spec.getParent();
-            
+
             if (parentId == null || parentId.isEmpty()) {
-                // This is a root executor
-                if (foundRoot != null) {
-                    throw new IllegalArgumentException(
-                            "Multiple root executors found: '" + foundRoot + "' and '" + spec.getId() + "'");
-                }
-                foundRoot = spec.getId();
+                rootIds.add(spec.getId());
             } else {
-                // Validate parent exists
                 if (!executors.containsKey(parentId)) {
                     throw new IllegalArgumentException(
                             "Executor '" + spec.getId() + "' references unknown parent '" + parentId + "'");
                 }
-                
-                // Add to children map
+                if (spec.getQueueCapacity() > 0) {
+                    throw new ConfigurationException(
+                            "queue-capacity is only valid on root executors: '" + spec.getId() + "'");
+                }
                 children.computeIfAbsent(parentId, k -> new ArrayList<>()).add(spec.getId());
             }
         }
 
-        if (foundRoot == null) {
+        if (rootIds.isEmpty()) {
             throw new IllegalArgumentException("No root executor found (executor without parent)");
         }
-        this.rootId = foundRoot;
 
-        // Validate no cycles
         validateNoCycles();
-
-        // Validate child TPS <= parent TPS
         validateTpsConstraints();
 
-        log.info("ExecutorHierarchy initialized with root '{}' and {} total executors", 
-                rootId, executors.size());
+        log.info("ExecutorHierarchy initialized: {} root(s) {}, {} total executors",
+                rootIds.size(), rootIds, executors.size());
     }
 
     /**
      * Get executor chain from leaf to root (inclusive).
-     * Order: [executorId, parentId, grandparentId, ..., rootId]
      */
     public List<String> getExecutorChain(String executorId) {
         List<String> chain = new ArrayList<>();
         String current = executorId;
-        
+
         while (current != null) {
             if (chain.contains(current)) {
                 throw new IllegalStateException("Cycle detected in executor chain: " + chain);
             }
             chain.add(current);
-            
+
             ExecutorSpec spec = executors.get(current);
             if (spec == null) {
                 throw new IllegalArgumentException("Unknown executor: " + current);
             }
             current = spec.getParent();
         }
-        
+
         return chain;
     }
 
@@ -107,6 +104,31 @@ public class ExecutorHierarchy {
      */
     public Set<String> getAllExecutorIds() {
         return Collections.unmodifiableSet(executors.keySet());
+    }
+
+    /**
+     * Get all root executor IDs.
+     */
+    public Set<String> getRootIds() {
+        return Collections.unmodifiableSet(rootIds);
+    }
+
+    /**
+     * Get the root executor ID for any executor (walks up the parent chain).
+     */
+    public String getRootIdFor(String executorId) {
+        String current = executorId;
+        while (current != null) {
+            if (rootIds.contains(current)) {
+                return current;
+            }
+            ExecutorSpec spec = executors.get(current);
+            if (spec == null) {
+                throw new IllegalArgumentException("Unknown executor: " + current);
+            }
+            current = spec.getParent();
+        }
+        throw new IllegalStateException("No root found for executor: " + executorId);
     }
 
     /**
@@ -125,17 +147,15 @@ public class ExecutorHierarchy {
     }
 
     /**
-     * Get root executor ID.
+     * Get queue capacity for an executor's root queue.
+     * Always walks up to the root and reads its capacity.
+     * Defaults to {@value DEFAULT_QUEUE_CAPACITY} if root has no explicit capacity set.
      */
-    public String getRootId() {
-        return rootId;
-    }
-
-    /**
-     * Get root executor spec.
-     */
-    public ExecutorSpec getRoot() {
-        return executors.get(rootId);
+    public int getQueueCapacity(String executorId) {
+        String rootId = getRootIdFor(executorId);
+        ExecutorSpec root = executors.get(rootId);
+        int cap = root != null ? root.getQueueCapacity() : 0;
+        return cap > 0 ? cap : DEFAULT_QUEUE_CAPACITY;
     }
 
     /**
@@ -146,10 +166,10 @@ public class ExecutorHierarchy {
     }
 
     /**
-     * Check if an executor is the root.
+     * Check if an executor is a root (has no parent).
      */
     public boolean isRoot(String executorId) {
-        return rootId.equals(executorId);
+        return rootIds.contains(executorId);
     }
 
     /**
@@ -158,15 +178,6 @@ public class ExecutorHierarchy {
     public String getParent(String executorId) {
         ExecutorSpec spec = executors.get(executorId);
         return spec != null ? spec.getParent() : null;
-    }
-
-    /**
-     * Get queue capacity for a specific executor.
-     * Returns 0 if not configured (unbounded).
-     */
-    public int getQueueCapacity(String executorId) {
-        ExecutorSpec spec = executors.get(executorId);
-        return spec != null ? spec.getQueueCapacity() : 0;
     }
 
     /**
@@ -188,19 +199,19 @@ public class ExecutorHierarchy {
     public int getDepth(String executorId) {
         int depth = 0;
         String current = executorId;
-        
+
         while (current != null && !isRoot(current)) {
             depth++;
             current = getParent(current);
         }
-        
+
         return depth;
     }
 
     private void validateNoCycles() {
         Set<String> visited = new HashSet<>();
         Set<String> inStack = new HashSet<>();
-        
+
         for (String id : executors.keySet()) {
             if (!visited.contains(id)) {
                 if (hasCycle(id, visited, inStack)) {
@@ -213,7 +224,7 @@ public class ExecutorHierarchy {
     private boolean hasCycle(String id, Set<String> visited, Set<String> inStack) {
         visited.add(id);
         inStack.add(id);
-        
+
         List<String> childList = children.get(id);
         if (childList != null) {
             for (String child : childList) {
@@ -226,7 +237,7 @@ public class ExecutorHierarchy {
                 }
             }
         }
-        
+
         inStack.remove(id);
         return false;
     }
@@ -235,12 +246,11 @@ public class ExecutorHierarchy {
         for (ExecutorSpec spec : executors.values()) {
             if (spec.getParent() != null && !spec.getParent().isEmpty()) {
                 ExecutorSpec parent = executors.get(spec.getParent());
-                
-                // If parent has TPS limit and child has TPS limit
+
                 if (parent != null && parent.getTps() > 0 && spec.getTps() > 0) {
                     if (spec.getTps() > parent.getTps()) {
                         throw new IllegalArgumentException(
-                                "Child executor '" + spec.getId() + "' TPS (" + spec.getTps() + 
+                                "Child executor '" + spec.getId() + "' TPS (" + spec.getTps() +
                                 ") cannot exceed parent '" + parent.getId() + "' TPS (" + parent.getTps() + ")");
                     }
                 }

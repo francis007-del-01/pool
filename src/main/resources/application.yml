@@ -9,10 +9,11 @@ pool:
   name: "example-pool"
   version: "1.0"
 
-  # TPS-based Hierarchical Executors (each with its own queue)
+  # TPS-based Hierarchical Executors
+  # Only root executors have a queue. Children share the root's queue.
   adapters:
     executors:
-      # Root executor - overall TPS budget
+      # Root executor - overall TPS budget + single shared queue
       - id: "main"
         tps: 1000
         queue-capacity: 5000
@@ -21,13 +22,11 @@ pool:
       - id: "fast"
         parent: "main"
         tps: 500
-        queue-capacity: 2000
 
       # Child executor for bulk traffic
       - id: "bulk"
         parent: "main"
         tps: 300
-        queue-capacity: 1000
 
   # Priority Strategy Configuration
   priority-strategy:

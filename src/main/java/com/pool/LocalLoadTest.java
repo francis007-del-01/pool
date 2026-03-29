@@ -360,8 +360,8 @@ public class LocalLoadTest {
         // fast: TPS=5, queue cap=20 → 200 tasks will overflow heavily
         var executors = List.of(
             ExecutorSpec.root("main", 1000, 10000),
-            ExecutorSpec.child("fast", "main", 5, 20),
-            ExecutorSpec.child("bulk", "main", 100, 500)
+            ExecutorSpec.child("fast", "main", 5),
+            ExecutorSpec.child("bulk", "main", 100)
         );
         var cfg = new PoolConfig();
         cfg.setName("overflow-test"); cfg.setVersion("1.0");
@@ -815,8 +815,8 @@ public class LocalLoadTest {
         var adapters = new AdaptersConfig();
         adapters.setExecutors(new ArrayList<>(List.of(
             ExecutorSpec.root("main", mainTps, 10000),
-            ExecutorSpec.child("fast", "main", fastTps, 5000),
-            ExecutorSpec.child("bulk", "main", bulkTps, 3000)
+            ExecutorSpec.child("fast", "main", fastTps),
+            ExecutorSpec.child("bulk", "main", bulkTps)
         )));
         cfg.setAdapters(adapters);
         cfg.setPriorityTree(new ArrayList<>(List.of(

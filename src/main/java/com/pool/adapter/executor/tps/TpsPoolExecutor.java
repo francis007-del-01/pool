@@ -3,6 +3,7 @@ package com.pool.adapter.executor.tps;
 import com.pool.config.ExecutorHierarchy;
 import com.pool.config.PoolConfig;
 import com.pool.core.TaskContext;
+import com.pool.exception.ConfigurationException;
 import com.pool.exception.TaskRejectedException;
 import com.pool.policy.EvaluationResult;
 import com.pool.policy.PolicyEngine;
@@ -43,7 +44,7 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
         log.info("TpsPoolExecutor initialized: {} with {} executors, root TPS: {}",
                 config.getName(),
                 config.getExecutors().size(),
-                hierarchy.getTps(hierarchy.getRootId()));
+                hierarchy.getTps(hierarchy.getRootIds().iterator().next()));
     }
 
     @Override
@@ -64,7 +65,7 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
 
         // Use default executor if none specified
         if (executorId == null || executorId.isEmpty()) {
-            executorId = hierarchy.getRootId();
+            throw new ConfigurationException("Priority tree leaf node has no executor assigned — check your YAML priority-tree configuration");
         }
 
         PriorityKey priorityKey = result.getPriorityKey();
@@ -106,7 +107,7 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
         String executorId = result.getMatchedPath().executor();
 
         if (executorId == null || executorId.isEmpty()) {
-            executorId = hierarchy.getRootId();
+            throw new ConfigurationException("Priority tree leaf node has no executor assigned — check your YAML priority-tree configuration");
         }
 
         PriorityKey priorityKey = result.getPriorityKey();
@@ -210,8 +211,8 @@ public class TpsPoolExecutor implements com.pool.adapter.executor.PoolExecutor {
                 rejectedCount.get(),
                 getQueueSize(),
                 queueManager.getActiveCount(),
-                hierarchy.getTps(hierarchy.getRootId()),
-                tpsGate.getCurrentTps(hierarchy.getRootId())
+                hierarchy.getTps(hierarchy.getRootIds().iterator().next()),
+                tpsGate.getCurrentTps(hierarchy.getRootIds().iterator().next())
         );
     }
 

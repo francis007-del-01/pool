@@ -200,7 +200,7 @@ class TpsPoolExecutorTest {
     void shouldGetHierarchyAndGate() {
         assertNotNull(executor.getHierarchy());
         assertNotNull(executor.getTpsGate());
-        assertEquals("main", executor.getHierarchy().getRootId());
+        assertEquals("main", executor.getHierarchy().getRootIds().iterator().next());
     }
 
     @Test

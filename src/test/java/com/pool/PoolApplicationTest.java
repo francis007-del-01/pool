@@ -307,7 +307,7 @@ class PoolApplicationTest {
     @DisplayName("Get executor hierarchy")
     void getExecutorHierarchy() {
         assertNotNull(executor.getHierarchy());
-        assertEquals("main", executor.getHierarchy().getRootId());
+        assertEquals("main", executor.getHierarchy().getRootIds().iterator().next());
         assertTrue(executor.getHierarchy().getAllExecutorIds().contains("fast"));
         assertTrue(executor.getHierarchy().getAllExecutorIds().contains("bulk"));
     }
@@ -533,8 +533,8 @@ class PoolApplicationTest {
         // Create executors matching pool.yaml
         List<ExecutorSpec> executors = new ArrayList<>(List.of(
                 ExecutorSpec.root("main", 1000, 5000),
-                ExecutorSpec.child("fast", "main", 500, 2000),
-                ExecutorSpec.child("bulk", "main", 300, 1000)
+                ExecutorSpec.child("fast", "main", 500),
+                ExecutorSpec.child("bulk", "main", 300)
         ));
 
         // Create priority tree matching pool.yaml

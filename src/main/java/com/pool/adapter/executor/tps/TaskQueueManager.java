@@ -57,12 +57,12 @@ public class TaskQueueManager {
     }
 
     private void startDrainers() {
-        for (String executorId : hierarchy.getAllExecutorIds()) {
-            Thread drainer = new Thread(() -> drainQueue(executorId),
-                    "queue-drainer-" + executorId);
+        for (String rootId : hierarchy.getRootIds()) {
+            Thread drainer = new Thread(() -> drainQueue(rootId),
+                    "queue-drainer-" + rootId);
             drainer.setDaemon(true);
             drainer.start();
-            drainerThreads.put(executorId, drainer);
+            drainerThreads.put(rootId, drainer);
         }
     }
 
@@ -88,7 +88,7 @@ public class TaskQueueManager {
      */
     public void queueTask(Runnable task, String requestId, String executorId,
                            PriorityKey priorityKey, TaskContext context) {
-        PriorityStrategy<QueuedTask> strategy = getStrategy(executorId);
+        PriorityStrategy<QueuedTask> strategy = getStrategy(hierarchy.getRootIdFor(executorId));
 
         QueuedTask queuedTask = new QueuedTask(task, requestId, executorId, priorityKey, context, null);
         PrioritizedPayload<QueuedTask> payload = new PrioritizedPayload<>(queuedTask, requestId, priorityKey);
@@ -111,7 +111,7 @@ public class TaskQueueManager {
      * @return CompletableFuture that completes when admitted, or exceptionally on queue full
      */
     public CompletableFuture<Void> queueAndAwait(String executorId, PriorityKey priorityKey, TaskContext context) {
-        PriorityStrategy<QueuedTask> strategy = getStrategy(executorId);
+        PriorityStrategy<QueuedTask> strategy = getStrategy(hierarchy.getRootIdFor(executorId));
 
         CompletableFuture<Void> future = new CompletableFuture<>();
         String requestId = context.getTaskId();
@@ -229,7 +229,7 @@ public class TaskQueueManager {
     }
 
     public int getQueueSize(String executorId) {
-        PriorityStrategy<QueuedTask> strategy = executorStrategies.get(executorId);
+        PriorityStrategy<QueuedTask> strategy = executorStrategies.get(hierarchy.getRootIdFor(executorId));
         return strategy != null ? strategy.getQueueSize() : 0;
     }
 

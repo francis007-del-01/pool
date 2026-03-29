@@ -53,18 +53,6 @@ public class ExecutorSpec {
     }
 
     /**
-     * Create a child executor with TPS limit and queue capacity.
-     */
-    public static ExecutorSpec child(String id, String parent, int tps, int queueCapacity) {
-        ExecutorSpec spec = new ExecutorSpec();
-        spec.setId(id);
-        spec.setParent(parent);
-        spec.setTps(tps);
-        spec.setQueueCapacity(queueCapacity);
-        return spec;
-    }
-
-    /**
      * Create an unbounded root executor.
      */
     public static ExecutorSpec unboundedRoot(String id, int queueCapacity) {

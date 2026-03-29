@@ -36,10 +36,10 @@ public class TpsSystemConfig {
 
     public TpsSystemConfig(PoolConfig config) {
         this.hierarchy = new ExecutorHierarchy(config);
-        for (String executorId : hierarchy.getAllExecutorIds()) {
+        for (String rootId : hierarchy.getRootIds()) {
             ReentrantLock lock = new ReentrantLock();
-            capacityLocks.put(executorId, lock);
-            capacityConditions.put(executorId, lock.newCondition());
+            capacityLocks.put(rootId, lock);
+            capacityConditions.put(rootId, lock.newCondition());
         }
         log.info("TpsSystemConfig initialized: {} executors, locks and conditions ready",
                 hierarchy.getAllExecutorIds().size());
@@ -57,7 +57,7 @@ public class TpsSystemConfig {
         for (String executorId : hierarchy.getAllExecutorIds()) {
             TpsCounter counter = new TpsCounter(DEFAULT_WINDOW_SIZE_MS);
             final String execId = executorId;
-            counter.setOnReset(() -> signalCapacity(execId));
+            counter.setOnReset(() -> signalCapacity(hierarchy.getRootIdFor(execId)));
             counters.put(executorId, counter);
         }
 
@@ -68,9 +68,9 @@ public class TpsSystemConfig {
     public TaskQueueManager taskQueueManager(ExecutorHierarchy hierarchy, TpsGate tpsGate) {
         Map<String, com.pool.strategy.PriorityStrategy<TaskQueueManager.QueuedTask>> executorStrategies = new ConcurrentHashMap<>();
 
-        for (String executorId : hierarchy.getAllExecutorIds()) {
-            int queueCapacity = hierarchy.getQueueCapacity(executorId);
-            executorStrategies.put(executorId,
+        for (String rootId : hierarchy.getRootIds()) {
+            int queueCapacity = hierarchy.getQueueCapacity(rootId);
+            executorStrategies.put(rootId,
                     com.pool.strategy.PriorityStrategyFactory.createDefault(queueCapacity));
         }
 

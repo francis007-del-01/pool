@@ -3,6 +3,7 @@ package com.pool.aspect;
 import com.pool.adapter.executor.tps.TaskQueueManager;
 import com.pool.adapter.executor.tps.TpsGate;
 import com.pool.adapter.executor.tps.TpsPoolExecutor;
+import com.pool.annotation.ContextType;
 import com.pool.annotation.Pooled;
 import com.pool.config.*;
 import com.pool.core.TpsContext;
@@ -154,18 +155,20 @@ class RequestInterceptorAspectTest {
             return t;
         });
 
-        for (String id : hierarchy.getAllExecutorIds()) {
+        for (String rootId : hierarchy.getRootIds()) {
             var lock = new java.util.concurrent.locks.ReentrantLock();
-            locks.put(id, lock);
-            conditions.put(id, lock.newCondition());
-            int cap = hierarchy.getQueueCapacity(id);
-            strategies.put(id, com.pool.strategy.PriorityStrategyFactory.createDefault(
-                    cap <= 0 ? Integer.MAX_VALUE : cap));
+            locks.put(rootId, lock);
+            conditions.put(rootId, lock.newCondition());
+            int cap = hierarchy.getQueueCapacity(rootId);
+            strategies.put(rootId, com.pool.strategy.PriorityStrategyFactory.createDefault(cap));
+        }
 
+        for (String id : hierarchy.getAllExecutorIds()) {
             TpsCounter counter = tpsGate.getCounter(id);
             if (counter != null) {
-                var l = lock;
-                var c = conditions.get(id);
+                String rootId = hierarchy.getRootIdFor(id);
+                var l = locks.get(rootId);
+                var c = conditions.get(rootId);
                 counter.setOnReset(() -> { l.lock(); try { c.signalAll(); } finally { l.unlock(); } });
             }
         }
@@ -220,6 +223,32 @@ class RequestInterceptorAspectTest {
         return config;
     }
 
+    @Test
+    @DisplayName("Single contextType auto-named from class → $req.orderRequest.*")
+    void singleContextTypeAutoNamed() {
+        OrderService proxy = createProxy(new OrderService());
+        String result = proxy.process(new OrderRequest("ORD-1", 500.0));
+        assertEquals("order: ORD-1", result);
+    }
+
+    @Test
+    @DisplayName("Two different contextTypes auto-named → $req.orderRequest.* and $req.customerInfo.*")
+    void twoContextTypesDifferentTypes() {
+        MultiContextService proxy = createProxy(new MultiContextService());
+        String result = proxy.process(new OrderRequest("ORD-2", 200.0), new CustomerInfo("PLATINUM"));
+        assertEquals("order: ORD-2 tier: PLATINUM", result);
+    }
+
+    @Test
+    @DisplayName("Same type twice with explicit names → $req.before.* and $req.after.*")
+    void sameTypeTwiceExplicitNames() {
+        CompareService proxy = createProxy(new CompareService());
+        String result = proxy.compare(new OrderRequest("ORD-A", 100.0), new OrderRequest("ORD-B", 200.0));
+        assertEquals("before: ORD-A after: ORD-B", result);
+    }
+
+    // ---- test service classes ----
+
     @Pooled
     public static class SampleService {
         public String doWork(String input) {
@@ -240,4 +269,34 @@ class RequestInterceptorAspectTest {
             throw new RuntimeException("intentional failure");
         }
     }
+
+    @Pooled(contextTypes = @ContextType(type = OrderRequest.class))
+    public static class OrderService {
+        public String process(OrderRequest order) {
+            return "order: " + order.orderId();
+        }
+    }
+
+    @Pooled(contextTypes = {
+        @ContextType(type = OrderRequest.class),
+        @ContextType(type = CustomerInfo.class)
+    })
+    public static class MultiContextService {
+        public String process(OrderRequest order, CustomerInfo customer) {
+            return "order: " + order.orderId() + " tier: " + customer.tier();
+        }
+    }
+
+    @Pooled(contextTypes = {
+        @ContextType(name = "before", type = OrderRequest.class),
+        @ContextType(name = "after",  type = OrderRequest.class)
+    })
+    public static class CompareService {
+        public String compare(OrderRequest before, OrderRequest after) {
+            return "before: " + before.orderId() + " after: " + after.orderId();
+        }
+    }
+
+    record OrderRequest(String orderId, double amount) {}
+    record CustomerInfo(String tier) {}
 }

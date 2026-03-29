@@ -1,6 +1,7 @@
 package com.pool.aspect;
 
 import com.pool.adapter.executor.tps.TpsPoolExecutor;
+import com.pool.annotation.ContextType;
 import com.pool.annotation.Pooled;
 import com.pool.core.TaskContext;
 import com.pool.core.TaskContextFactory;
@@ -17,7 +18,9 @@ import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -103,19 +106,43 @@ public class RequestInterceptorAspect {
     private TaskContext buildTaskContext(ProceedingJoinPoint pjp, Pooled pooled) {
         MethodSignature sig = (MethodSignature) pjp.getSignature();
 
-        // Request vars: parsed from the contextType argument
+        // Request vars: each @ContextType entry is matched positionally to a method arg
+        // and serialized under its namespace as "name.field" keys.
         String jsonPayload = null;
-        if (pooled.contextType() != Void.class) {
-            for (Object arg : pjp.getArgs()) {
-                if (arg != null && pooled.contextType().isInstance(arg)) {
-                    try {
-                        jsonPayload = objectMapper.writeValueAsString(arg);
-                    } catch (Exception e) {
-                        log.warn("Failed to serialize request arg of type {}: {}",
-                                pooled.contextType().getSimpleName(), e.getMessage());
+        ContextType[] contextTypes = pooled.contextTypes();
+        if (contextTypes.length > 0) {
+            Map<String, Object> reqVars = new HashMap<>();
+            Object[] args = pjp.getArgs();
+            Set<Integer> consumed = new HashSet<>();
+
+            for (ContextType ct : contextTypes) {
+                String namespace = ct.name().isEmpty()
+                        ? Character.toLowerCase(ct.type().getSimpleName().charAt(0))
+                            + ct.type().getSimpleName().substring(1)
+                        : ct.name();
+
+                for (int i = 0; i < args.length; i++) {
+                    if (!consumed.contains(i) && args[i] != null && ct.type().isInstance(args[i])) {
+                        consumed.add(i);
+                        try {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> fields = objectMapper.convertValue(args[i], Map.class);
+                            for (Map.Entry<String, Object> e : fields.entrySet()) {
+                                reqVars.put(namespace + "." + e.getKey(), e.getValue());
+                            }
+                        } catch (Exception e) {
+                            log.warn("Failed to serialize context arg of type {}: {}",
+                                    ct.type().getSimpleName(), e.getMessage());
+                        }
+                        break;
                     }
-                    break;
                 }
+            }
+
+            try {
+                jsonPayload = objectMapper.writeValueAsString(reqVars);
+            } catch (Exception e) {
+                log.warn("Failed to serialize request vars: {}", e.getMessage());
             }
         }
 

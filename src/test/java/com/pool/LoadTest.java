@@ -77,8 +77,8 @@ class LoadTest {
     private static PoolConfig makeConfig(int mainTps, int fastTps, int bulkTps) {
         List<ExecutorSpec> executors = List.of(
                 ExecutorSpec.root("main", mainTps, 10000),
-                ExecutorSpec.child("fast", "main", fastTps, 5000),
-                ExecutorSpec.child("bulk", "main", bulkTps, 3000)
+                ExecutorSpec.child("fast", "main", fastTps),
+                ExecutorSpec.child("bulk", "main", bulkTps)
         );
         List<PriorityNodeConfig> tree = List.of(
                 node("L1.NORTH_AMERICA", "$req.region == \"NORTH_AMERICA\"", null, null, List.of(
@@ -504,8 +504,8 @@ class LoadTest {
         // fast queue capacity = 20, fast TPS = 5
         List<ExecutorSpec> executors = List.of(
                 ExecutorSpec.root("main", 1000, 10000),
-                ExecutorSpec.child("fast", "main", 5, 20),
-                ExecutorSpec.child("bulk", "main", 100, 500)
+                ExecutorSpec.child("fast", "main", 5),
+                ExecutorSpec.child("bulk", "main", 100)
         );
         PoolConfig cfg = new PoolConfig();
         cfg.setName("overflow-test");

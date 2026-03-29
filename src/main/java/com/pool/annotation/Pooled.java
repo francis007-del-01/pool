@@ -14,20 +14,32 @@ import java.lang.annotation.Target;
  * <p>Context for policy evaluation is built from:
  * <ul>
  *   <li>MDC (SLF4J Mapped Diagnostic Context) — ambient request context</li>
- *   <li>A method argument matching {@link #contextType()} — parsed to a map
- *       by the existing request parser</li>
+ *   <li>Method arguments declared via {@link #contextTypes()} — each serialized
+ *       under its own namespace as {@code $req.<name>.<field>}</li>
  *   <li>Implicit variables: {@code _class} and {@code _method}</li>
  * </ul>
  *
  * <p>Class-level annotation gates all public methods. Method-level overrides class-level.
  *
- * <p>Example:
+ * <p>Examples:
  * <pre>
- * &#64;Service
- * &#64;Pooled(contextType = Headers.class)
- * public class MyService {
- *     public void doWork(String id, Headers headers) { ... }
- * }
+ * // Single context type — auto-named from class ($req.orderRequest.*)
+ * &#64;Pooled(contextTypes = &#64;ContextType(type = OrderRequest.class))
+ * public void process(OrderRequest order) { ... }
+ *
+ * // Two different types — auto-named
+ * &#64;Pooled(contextTypes = {
+ *     &#64;ContextType(type = OrderRequest.class),   // $req.orderRequest.*
+ *     &#64;ContextType(type = CustomerInfo.class)    // $req.customerInfo.*
+ * })
+ * public void process(OrderRequest order, CustomerInfo customer) { ... }
+ *
+ * // Same type twice — explicit names required
+ * &#64;Pooled(contextTypes = {
+ *     &#64;ContextType(name = "before", type = OrderRequest.class),
+ *     &#64;ContextType(name = "after",  type = OrderRequest.class)
+ * })
+ * public void compare(OrderRequest before, OrderRequest after) { ... }
  * </pre>
  */
 @Target({ElementType.TYPE, ElementType.METHOD})
@@ -35,11 +47,12 @@ import java.lang.annotation.Target;
 public @interface Pooled {
 
     /**
-     * Type of method argument to auto-detect and parse as request context.
-     * The aspect scans method arguments for the first {@code instanceof} match.
-     * Defaults to {@code Void.class} meaning MDC-only context (no request arg parsing).
+     * Declares which method arguments to include as named request context.
+     * Each entry is matched positionally to the first unconsumed argument of
+     * the declared type. Fields are exposed as {@code $req.<name>.<field>}.
+     * If empty, no request variables are extracted (MDC-only context).
      */
-    Class<?> contextType() default Void.class;
+    ContextType[] contextTypes() default {};
 
     /**
      * Timeout in milliseconds for TPS admission.

@@ -199,15 +199,24 @@ Annotate your service class or individual methods with `@Pooled` and Pool interc
 **Class-level** — gates every method in the class with the same config:
 
 ```java
+import com.pool.annotation.ContextType;
 import com.pool.annotation.Pooled;
 
 @Service
-@Pooled(contextType = OrderRequest.class, timeoutMs = 5000)
 public class OrderService {
-
+    @Pooled(contextTypes = @ContextType(type = OrderRequest.class), timeoutMs = 5000)
     public String processOrder(OrderRequest req) {
         return doProcess(req);
     }
+    
+    @Pooled(contextTypes = @ContextType(type = OrderRequest.class), timeoutMs = 5000)
+    public String createOrder(OrderRequest req){
+        
+        county=us->e1
+        counrty=in->e2        
+        
+    }
+    
 }
 ```
 
@@ -217,12 +226,12 @@ public class OrderService {
 @Service
 public class OrderService {
 
-    @Pooled(contextType = OrderRequest.class, timeoutMs = 5000)
+    @Pooled(contextTypes = @ContextType(type = OrderRequest.class), timeoutMs = 5000)
     public String processOrder(OrderRequest req) {
         return doProcess(req);
     }
 
-    @Pooled(contextType = RefundRequest.class, timeoutMs = 2000)
+    @Pooled(contextTypes = @ContextType(type = RefundRequest.class), timeoutMs = 2000)
     public void processRefund(RefundRequest req) {
         doRefund(req);
     }
@@ -232,9 +241,33 @@ public class OrderService {
 }
 ```
 
+**Multiple context types** — each arg gets its own namespace in expressions:
+
+```java
+// Two different types — auto-named from class ($req.orderRequest.*, $req.customerInfo.*)
+@Pooled(contextTypes = {
+    @ContextType(type = OrderRequest.class),
+    @ContextType(type = CustomerInfo.class)
+})
+public void process(OrderRequest order, CustomerInfo customer) { }
+
+// Same type twice — must use explicit names ($req.before.*, $req.after.*)
+@Pooled(contextTypes = {
+    @ContextType(name = "before", type = OrderRequest.class),
+    @ContextType(name = "after",  type = OrderRequest.class)
+})
+public void compare(OrderRequest before, OrderRequest after) { }
+```
+
+YAML using namespaced fields:
+```yaml
+condition: '$req.orderRequest.amount > 10000 AND $req.customerInfo.tier == "PLATINUM"'
+condition: '$req.before.amount > $req.after.amount'
+```
+
 **How it works:**
 1. The AOP aspect intercepts the method call before it reaches your code
-2. It extracts the method argument matching `contextType` and builds a `TaskContext` from it
+2. It extracts method arguments declared in `contextTypes` and builds a `TaskContext` from them
 3. The task is submitted to the `PoolExecutor` and the caller blocks until TPS capacity is available
 4. If TPS is not available within `timeoutMs`, a `TpsExceededException` is thrown
 5. Once admitted, the original method executes normally on a pool thread
@@ -243,15 +276,22 @@ public class OrderService {
 
 | Attribute | Default | Description |
 |-----------|---------|-------------|
-| `contextType` | `Void.class` | Type of the method argument to use as request context. Pool will extract `$req.*` variables from this object (parsed as JSON). Use `Void.class` to rely on MDC only. |
+| `contextTypes` | `{}` (empty) | Array of `@ContextType` entries declaring which method args to include as request context. If empty, no `$req.*` variables are extracted (MDC-only). |
 | `timeoutMs` | `-1` (pool default: 5000ms) | How long to wait for TPS admission before throwing `TpsExceededException`. |
+
+**`@ContextType` attributes:**
+
+| Attribute | Default | Description |
+|-----------|---------|-------------|
+| `type` | required | Type of the method argument to match. Matched positionally — first unconsumed arg of this type. |
+| `name` | `""` | Namespace for this arg's fields in expressions (`$req.<name>.<field>`). If empty, the class simple name is used with first letter lowercased (e.g. `OrderRequest` → `orderRequest`). |
 
 **Cascading calls (service A calls service B):**
 If both services are annotated with `@Pooled`, Pool uses a thread-local flag (`TpsContext`) so that once a request is admitted, any nested calls to other `@Pooled`-annotated services on the same thread bypass the TPS gate — no double-gating, no deadlock risk.
 
 ```java
 @Service
-@Pooled(contextType = OrderRequest.class)
+@Pooled(contextTypes = @ContextType(type = OrderRequest.class))
 public class OrderService {
     @Autowired private PaymentService paymentService;
 
