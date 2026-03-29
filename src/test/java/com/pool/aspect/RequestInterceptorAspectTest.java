@@ -3,7 +3,7 @@ package com.pool.aspect;
 import com.pool.adapter.executor.tps.TaskQueueManager;
 import com.pool.adapter.executor.tps.TpsGate;
 import com.pool.adapter.executor.tps.TpsPoolExecutor;
-import com.pool.annotation.ContextType;
+import com.pool.annotation.PoolContextBuilder;
 import com.pool.annotation.Pooled;
 import com.pool.config.*;
 import com.pool.core.TpsContext;
@@ -17,11 +17,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;
 import org.springframework.aop.aspectj.annotation.AspectJProxyFactory;
+import org.springframework.context.ApplicationContext;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
+
+import static org.mockito.Mockito.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -33,12 +36,17 @@ class RequestInterceptorAspectTest {
 
     private TpsPoolExecutor tpsPoolExecutor;
     private RequestInterceptorAspect aspect;
+    private ApplicationContext appContext;
 
     @BeforeEach
     void setUp() {
         PoolConfig config = createTestConfig();
         tpsPoolExecutor = buildExecutor(config);
-        aspect = new RequestInterceptorAspect(tpsPoolExecutor, new ObjectMapper());
+        appContext = mock(ApplicationContext.class);
+        when(appContext.getBean(OrderBuilder.class)).thenReturn(new OrderBuilder());
+        when(appContext.getBean(MultiContextBuilder.class)).thenReturn(new MultiContextBuilder());
+        when(appContext.getBean(CompareBuilder.class)).thenReturn(new CompareBuilder());
+        aspect = new RequestInterceptorAspect(tpsPoolExecutor, new ObjectMapper(), appContext);
     }
 
     @AfterEach
@@ -112,7 +120,7 @@ class RequestInterceptorAspectTest {
         TpsPoolExecutor restrictedExecutor = buildExecutor(config, 60000);
 
         RequestInterceptorAspect restrictedAspect = new RequestInterceptorAspect(
-                restrictedExecutor, new ObjectMapper());
+                restrictedExecutor, new ObjectMapper(), mock(ApplicationContext.class));
 
         SampleServiceWithTimeout rawService = new SampleServiceWithTimeout();
         AspectJProxyFactory factory = new AspectJProxyFactory(rawService);
@@ -224,24 +232,24 @@ class RequestInterceptorAspectTest {
     }
 
     @Test
-    @DisplayName("Single contextType auto-named from class → $req.orderRequest.*")
-    void singleContextTypeAutoNamed() {
+    @DisplayName("PoolContextBuilder called and result serialized as request context")
+    void contextBuilderInvoked() {
         OrderService proxy = createProxy(new OrderService());
         String result = proxy.process(new OrderRequest("ORD-1", 500.0));
         assertEquals("order: ORD-1", result);
     }
 
     @Test
-    @DisplayName("Two different contextTypes auto-named → $req.orderRequest.* and $req.customerInfo.*")
-    void twoContextTypesDifferentTypes() {
+    @DisplayName("Builder receiving multiple args composes context correctly")
+    void multiArgBuilder() {
         MultiContextService proxy = createProxy(new MultiContextService());
         String result = proxy.process(new OrderRequest("ORD-2", 200.0), new CustomerInfo("PLATINUM"));
         assertEquals("order: ORD-2 tier: PLATINUM", result);
     }
 
     @Test
-    @DisplayName("Same type twice with explicit names → $req.before.* and $req.after.*")
-    void sameTypeTwiceExplicitNames() {
+    @DisplayName("Builder receiving two args of same type composes context correctly")
+    void sameTypeMultipleArgs() {
         CompareService proxy = createProxy(new CompareService());
         String result = proxy.compare(new OrderRequest("ORD-A", 100.0), new OrderRequest("ORD-B", 200.0));
         assertEquals("before: ORD-A after: ORD-B", result);
@@ -270,30 +278,52 @@ class RequestInterceptorAspectTest {
         }
     }
 
-    @Pooled(contextTypes = @ContextType(type = OrderRequest.class))
+    @Pooled(contextType = OrderBuilder.class)
     public static class OrderService {
         public String process(OrderRequest order) {
             return "order: " + order.orderId();
         }
     }
 
-    @Pooled(contextTypes = {
-        @ContextType(type = OrderRequest.class),
-        @ContextType(type = CustomerInfo.class)
-    })
+    @Pooled(contextType = MultiContextBuilder.class)
     public static class MultiContextService {
         public String process(OrderRequest order, CustomerInfo customer) {
             return "order: " + order.orderId() + " tier: " + customer.tier();
         }
     }
 
-    @Pooled(contextTypes = {
-        @ContextType(name = "before", type = OrderRequest.class),
-        @ContextType(name = "after",  type = OrderRequest.class)
-    })
+    @Pooled(contextType = CompareBuilder.class)
     public static class CompareService {
         public String compare(OrderRequest before, OrderRequest after) {
             return "before: " + before.orderId() + " after: " + after.orderId();
+        }
+    }
+
+    // ---- context builders ----
+
+    public static class OrderBuilder implements PoolContextBuilder {
+        @Override
+        public Object build(Object[] args) {
+            OrderRequest req = (OrderRequest) args[0];
+            return Map.of("orderId", req.orderId(), "amount", req.amount());
+        }
+    }
+
+    public static class MultiContextBuilder implements PoolContextBuilder {
+        @Override
+        public Object build(Object[] args) {
+            OrderRequest order = (OrderRequest) args[0];
+            CustomerInfo customer = (CustomerInfo) args[1];
+            return Map.of("orderId", order.orderId(), "tier", customer.tier());
+        }
+    }
+
+    public static class CompareBuilder implements PoolContextBuilder {
+        @Override
+        public Object build(Object[] args) {
+            OrderRequest before = (OrderRequest) args[0];
+            OrderRequest after = (OrderRequest) args[1];
+            return Map.of("before", before.orderId(), "after", after.orderId());
         }
     }
 

@@ -59,14 +59,12 @@ pool:
       - id: "vip"
         parent: "main"
         tps: 400               # Max 400 TPS (from main's budget)
-        queue_capacity: 2000   # Queue for VIP executor
         identifier_field: "$req.requestId"  # Count by request ID
 
-      # Child executor for bulk processing  
+      # Child executor for bulk processing
       - id: "bulk"
         parent: "main"
         tps: 200               # Max 200 TPS (from main's budget)
-        queue_capacity: 1000   # Queue for bulk executor
         identifier_field: "$req.requestId"  # Count by request ID
 
   priority-strategy:
@@ -179,6 +177,7 @@ pool.config-path=classpath:pool.yaml
 ```
 
 ```java
+// Option A: Manual submission
 @Service
 public class OrderService {
 
@@ -196,27 +195,20 @@ public class OrderService {
 
 Annotate your service class or individual methods with `@Pooled` and Pool intercepts those calls automatically via AOP. No manual `TaskContext` creation or `PoolExecutor` wiring needed.
 
-**Class-level** — gates every method in the class with the same config:
+**Class-level** — gates every method in the class:
 
 ```java
-import com.pool.annotation.ContextType;
 import com.pool.annotation.Pooled;
 
 @Service
+@Pooled(contextType = OrderContextBuilder.class, timeoutMs = 5000)
 public class OrderService {
-    @Pooled(contextTypes = @ContextType(type = OrderRequest.class), timeoutMs = 5000)
     public String processOrder(OrderRequest req) {
         return doProcess(req);
     }
-    
-    @Pooled(contextTypes = @ContextType(type = OrderRequest.class), timeoutMs = 5000)
-    public String createOrder(OrderRequest req){
-        
-        county=us->e1
-        counrty=in->e2        
-        
+    public String createOrder(OrderRequest req) {
+        return doCreate(req);
     }
-    
 }
 ```
 
@@ -226,12 +218,12 @@ public class OrderService {
 @Service
 public class OrderService {
 
-    @Pooled(contextTypes = @ContextType(type = OrderRequest.class), timeoutMs = 5000)
+    @Pooled(contextType = OrderContextBuilder.class, timeoutMs = 5000)
     public String processOrder(OrderRequest req) {
         return doProcess(req);
     }
 
-    @Pooled(contextTypes = @ContextType(type = RefundRequest.class), timeoutMs = 2000)
+    @Pooled(contextType = RefundContextBuilder.class, timeoutMs = 2000)
     public void processRefund(RefundRequest req) {
         doRefund(req);
     }
@@ -241,33 +233,53 @@ public class OrderService {
 }
 ```
 
-**Multiple context types** — each arg gets its own namespace in expressions:
+**`PoolContextBuilder`** — implement this interface as a Spring bean to expose method arguments as `$req.*` variables for YAML conditions:
 
 ```java
-// Two different types — auto-named from class ($req.orderRequest.*, $req.customerInfo.*)
-@Pooled(contextTypes = {
-    @ContextType(type = OrderRequest.class),
-    @ContextType(type = CustomerInfo.class)
-})
-public void process(OrderRequest order, CustomerInfo customer) { }
-
-// Same type twice — must use explicit names ($req.before.*, $req.after.*)
-@Pooled(contextTypes = {
-    @ContextType(name = "before", type = OrderRequest.class),
-    @ContextType(name = "after",  type = OrderRequest.class)
-})
-public void compare(OrderRequest before, OrderRequest after) { }
+@Component
+public class OrderContextBuilder implements PoolContextBuilder {
+    @Override
+    public Object build(Object[] args) {
+        OrderRequest req = (OrderRequest) args[0];
+        return Map.of("amount", req.getAmount(), "tier", req.getTier());
+    }
+}
 ```
 
-YAML using namespaced fields:
+The returned object is serialized by Jackson. Its fields are accessible in YAML as `$req.<field>`:
+
 ```yaml
-condition: '$req.orderRequest.amount > 10000 AND $req.customerInfo.tier == "PLATINUM"'
-condition: '$req.before.amount > $req.after.amount'
+condition: '$req.amount > 10000 AND $req.tier == "PLATINUM"'
+```
+
+For methods with multiple arguments, compose them however you like:
+
+```java
+@Component
+public class CheckoutContextBuilder implements PoolContextBuilder {
+    @Override
+    public Object build(Object[] args) {
+        OrderRequest order = (OrderRequest) args[0];
+        CustomerInfo customer = (CustomerInfo) args[1];
+        return Map.of("amount", order.getAmount(), "tier", customer.getTier());
+    }
+}
+```
+
+```yaml
+condition: '$req.amount > 10000 AND $req.tier == "PLATINUM"'
+```
+
+If no context builder is needed (MDC-only context), omit `contextType`:
+
+```java
+@Pooled
+public void healthCheck() { }
 ```
 
 **How it works:**
 1. The AOP aspect intercepts the method call before it reaches your code
-2. It extracts method arguments declared in `contextTypes` and builds a `TaskContext` from them
+2. It looks up the `PoolContextBuilder` bean and calls `build(args)` to produce `$req.*` context
 3. The task is submitted to the `PoolExecutor` and the caller blocks until TPS capacity is available
 4. If TPS is not available within `timeoutMs`, a `TpsExceededException` is thrown
 5. Once admitted, the original method executes normally on a pool thread
@@ -276,22 +288,15 @@ condition: '$req.before.amount > $req.after.amount'
 
 | Attribute | Default | Description |
 |-----------|---------|-------------|
-| `contextTypes` | `{}` (empty) | Array of `@ContextType` entries declaring which method args to include as request context. If empty, no `$req.*` variables are extracted (MDC-only). |
+| `contextType` | `Void.class` | A `PoolContextBuilder` Spring bean class. Called with all method args; its return value is serialized as `$req.*` variables. If `Void.class`, no `$req.*` variables are extracted (MDC-only). |
 | `timeoutMs` | `-1` (pool default: 5000ms) | How long to wait for TPS admission before throwing `TpsExceededException`. |
-
-**`@ContextType` attributes:**
-
-| Attribute | Default | Description |
-|-----------|---------|-------------|
-| `type` | required | Type of the method argument to match. Matched positionally — first unconsumed arg of this type. |
-| `name` | `""` | Namespace for this arg's fields in expressions (`$req.<name>.<field>`). If empty, the class simple name is used with first letter lowercased (e.g. `OrderRequest` → `orderRequest`). |
 
 **Cascading calls (service A calls service B):**
 If both services are annotated with `@Pooled`, Pool uses a thread-local flag (`TpsContext`) so that once a request is admitted, any nested calls to other `@Pooled`-annotated services on the same thread bypass the TPS gate — no double-gating, no deadlock risk.
 
 ```java
 @Service
-@Pooled(contextTypes = @ContextType(type = OrderRequest.class))
+@Pooled(contextType = OrderContextBuilder.class)
 public class OrderService {
     @Autowired private PaymentService paymentService;
 
@@ -334,12 +339,12 @@ Each executor defines a TPS limit and optional parent:
 | `id` | required | Unique executor identifier |
 | `parent` | null | Parent executor ID (null for root) |
 | `tps` | 0 | Max TPS limit (0 = unbounded) |
-| `queue_capacity` | 0 | Max queue size when TPS exceeded |
+| `queue_capacity` | 1000 | Max shared queue size when TPS exceeded. **Root executors only** — setting this on a child throws a `ConfigurationException` at startup. |
 | `identifier_field` | null | Field to extract unique request ID for TPS counting (e.g., `$req.requestId`) |
 
 **Hierarchical TPS:**
 - Child executors consume from parent's TPS budget
-- If parent at limit, child requests are queued
+- All children under a root share one queue (the root's queue)
 - Child TPS cannot exceed parent TPS
 
 ### Priority Strategy
@@ -414,11 +419,11 @@ Pool uses **TPS (Transactions Per Second)** as the primary rate control mechanis
 
 1. **Executor Routing**: Leaf nodes in the priority tree specify an `executor` field. Tasks are routed to that executor's TPS gate.
 
-2. **Hierarchical TPS**: Child executors consume from parent's budget:
+2. **Hierarchical TPS**: Child executors consume from parent's budget, sharing the root's queue:
    ```
    main (1000 TPS, queue: 5000)
-   ├── vip (400 TPS, queue: 2000)    # Can use up to 400 of main's 1000
-   └── bulk (200 TPS, queue: 1000)   # Can use up to 200 of main's 1000
+   ├── vip (400 TPS)    # Up to 400 of main's 1000; shares main's queue
+   └── bulk (200 TPS)   # Up to 200 of main's 1000; shares main's queue
    ```
 
 3. **Unbounded Threads**: Threads spawn as needed when TPS allows - no fixed pool size.
@@ -446,14 +451,12 @@ adapters:
     - id: "vip"
       parent: "main"
       tps: 400
-      queue_capacity: 2000
       identifier_field: "$req.requestId"
 
     # Bulk executor: Background processing
     - id: "bulk"
       parent: "main"
       tps: 200
-      queue_capacity: 1000
       identifier_field: "$req.requestId"
 
 priority-tree:
@@ -846,21 +849,18 @@ pool:
       - id: "fast"
         parent: "main"
         tps: 500
-        queue_capacity: 2000
         identifier_field: "$req.orderId"
 
       # Standard lane: Regular orders
       - id: "standard"
         parent: "main"
         tps: 300
-        queue_capacity: 1500
         identifier_field: "$req.orderId"
 
       # Bulk lane: Low priority batch processing
       - id: "bulk"
         parent: "main"
         tps: 200
-        queue_capacity: 1000
         identifier_field: "$req.orderId"
 
   priority-strategy:

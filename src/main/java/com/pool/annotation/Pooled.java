@@ -14,8 +14,9 @@ import java.lang.annotation.Target;
  * <p>Context for policy evaluation is built from:
  * <ul>
  *   <li>MDC (SLF4J Mapped Diagnostic Context) — ambient request context</li>
- *   <li>Method arguments declared via {@link #contextTypes()} — each serialized
- *       under its own namespace as {@code $req.<name>.<field>}</li>
+ *   <li>A {@link PoolContextBuilder} Spring bean declared via {@link #contextType()} —
+ *       receives all method arguments and returns the object serialized as
+ *       {@code $req.*} variables</li>
  *   <li>Implicit variables: {@code _class} and {@code _method}</li>
  * </ul>
  *
@@ -23,23 +24,27 @@ import java.lang.annotation.Target;
  *
  * <p>Examples:
  * <pre>
- * // Single context type — auto-named from class ($req.orderRequest.*)
- * &#64;Pooled(contextTypes = &#64;ContextType(type = OrderRequest.class))
- * public void process(OrderRequest order) { ... }
+ * // With context builder
+ * &#64;Component
+ * public class OrderContextBuilder implements PoolContextBuilder {
+ *     public Object build(Object[] args) {
+ *         OrderRequest req = (OrderRequest) args[0];
+ *         return Map.of("amount", req.getAmount(), "tier", req.getTier());
+ *     }
+ * }
  *
- * // Two different types — auto-named
- * &#64;Pooled(contextTypes = {
- *     &#64;ContextType(type = OrderRequest.class),   // $req.orderRequest.*
- *     &#64;ContextType(type = CustomerInfo.class)    // $req.customerInfo.*
- * })
- * public void process(OrderRequest order, CustomerInfo customer) { ... }
+ * &#64;Service
+ * &#64;Pooled(contextType = OrderContextBuilder.class)
+ * public class OrderService {
+ *     public void process(OrderRequest req) { ... }
+ * }
  *
- * // Same type twice — explicit names required
- * &#64;Pooled(contextTypes = {
- *     &#64;ContextType(name = "before", type = OrderRequest.class),
- *     &#64;ContextType(name = "after",  type = OrderRequest.class)
- * })
- * public void compare(OrderRequest before, OrderRequest after) { ... }
+ * // MDC-only (no request args)
+ * &#64;Service
+ * &#64;Pooled
+ * public class HealthService {
+ *     public void check() { ... }
+ * }
  * </pre>
  */
 @Target({ElementType.TYPE, ElementType.METHOD})
@@ -47,12 +52,12 @@ import java.lang.annotation.Target;
 public @interface Pooled {
 
     /**
-     * Declares which method arguments to include as named request context.
-     * Each entry is matched positionally to the first unconsumed argument of
-     * the declared type. Fields are exposed as {@code $req.<name>.<field>}.
-     * If empty, no request variables are extracted (MDC-only context).
+     * A {@link PoolContextBuilder} implementation class (must be a Spring bean).
+     * The builder receives all method arguments and returns the object to serialize
+     * as {@code $req.*} variables for policy evaluation.
+     * Defaults to {@code Void.class} meaning MDC-only context (no request args parsed).
      */
-    ContextType[] contextTypes() default {};
+    Class<?> contextType() default Void.class;
 
     /**
      * Timeout in milliseconds for TPS admission.
